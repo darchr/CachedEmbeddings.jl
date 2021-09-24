@@ -3,6 +3,10 @@ uuid = "568ab1f6-6024-479d-8c48-2e5719c6bdea"
 authors = ["Mark Hildebrand <mhildebrand@ucdavis.edu> and contributors"]
 version = "0.1.0"
 
+[deps]
+CachedArrays = "ab676e89-bb37-4f49-b167-74749319f3dc"
+EmbeddingTables = "c151d800-c36a-44cc-9e8c-19173c45605f"
+
 [compat]
 julia = "1"
 
