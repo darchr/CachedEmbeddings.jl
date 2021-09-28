@@ -1,3 +1,17 @@
+module Atomics
+
+export atomic_ptr_load,
+    atomic_ptr_cas!,
+    atomic_ptr_add!,
+    atomic_ptr_sub!,
+    atomic_ptr_xchg!,
+    atomic_ptr_and!,
+    atomic_ptr_nand!,
+    atomic_ptr_or!,
+    atomic_ptr_xor!,
+    atomic_ptr_max!,
+    atomic_ptr_min!
+
 const inttypes = (Int8, Int16, Int32, Int64, UInt8, UInt16, UInt32, UInt64)
 const arithmetictypes = (inttypes...,)
 const atomictypes = (arithmetictypes..., Bool)
@@ -73,7 +87,7 @@ for typ in atomictypes
     arithmetic_ops = [:add, :sub]
     for rmwop in [arithmetic_ops..., :xchg, :and, :nand, :or, :xor, :max, :min]
         rmw = string(rmwop)
-        fn = Symbol("atomic_ptr", rmw, "!")
+        fn = Symbol("atomic_ptr_", rmw, "!")
         if (rmw == "max" || rmw == "min") && typ <: Unsigned
             # LLVM distinguishes signedness in the operation, not the integer type.
             rmw = "u" * rmw
@@ -95,4 +109,6 @@ for typ in atomictypes
             )
         end
     end
+end
+
 end

@@ -1,6 +1,6 @@
 using CachedEmbeddings
 using Test
 
-@testset "CachedEmbeddings.jl" begin
-    # Write your tests here.
-end
+include("tagged.jl")
+include("cache.jl")
+include("buffer.jl")
