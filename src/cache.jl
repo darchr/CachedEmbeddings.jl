@@ -4,14 +4,14 @@ struct FeatureCache{C <: AbstractArray}
     maxlen::Int
 
     # The cached data.
-    # N.B. - This may optionally include metadata more metadata than just the pure
-    # data array.
+    # N.B. - This may optionally include more metadata than just the pure data array.
     data::C
 end
 
 # Default definitions
 maxlength(x::AbstractVector) = length(x)
 maxlength(x::AbstractMatrix) = size(x, 2)
+filledcols(x::FeatureCache) = x.insert[] - 1
 
 function FeatureCache(data::C) where {C}
     maxlen = maxlength(data)
@@ -34,3 +34,11 @@ function acquire!(cache::FeatureCache)
     return col
 end
 
+"""
+    unsafe_unwrap(cache::FeatureCache)
+
+Return the raw data array wrapped by `cache`.
+The underlying data should only be accessed on the slice provided by a call to
+`acquire!(cache)`.
+"""
+unsafe_unwrap(cache::FeatureCache) = cache.data

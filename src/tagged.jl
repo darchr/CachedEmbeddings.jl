@@ -2,6 +2,8 @@ struct TaggedPtr{N}
     value::UInt
 end
 
+TaggedPtr{N}(ptr::Ptr) where {N} = TaggedPtr{N}(UInt(ptr) & ~mask(N))
+
 @inline value(x::TaggedPtr) = x.value
 @inline primitive(ptr::Ptr{TaggedPtr{N}}) where {N} = Ptr{UInt}(ptr)
 
@@ -33,11 +35,11 @@ end
         u = TaggedPtr{N}(Atomics.atomic_ptr_cas!(ptr, value(v), value(vnew)))
         success = (u === v)
     end
-    return (success, v[])
+    return (success, v[], gettag(v))
 end
 
 """
-    acquire!(ptr::Ptr{TaggedPtr{N}}, tag) -> (Bool, Ptr{Nothing})
+    acquire!(ptr::Ptr{TaggedPtr{N}}, tag) -> (Bool, Ptr{Nothing}, UInt)
 
 Retrieve the value pointed to by `ptr`.
 If the tag for the retrieved `TaggedPtr` does not match `tag`, then attempt to acquire
@@ -49,13 +51,16 @@ cached location. If the first element if `false`, then this value is either alre
 or owned by another thread. In this case, the caller has no responsibility and may return
 the retrieved `Ptr{Nothing}` directly.
 
+The final return element is the potentially old tag for the returned pointer.
+
 This function is (at least, **SHOULD** be) threadsafe.
 """
-function acquire!(ptr::Ptr{TaggedPtr{N}}, tag) where {N}
+@inline function acquire!(ptr::Ptr{TaggedPtr{N}}, tag) where {N}
     return acquire!(TaggedPtr{N}, primitive(ptr), tag)
 end
 
 function update_with_tag!(ptrptr::Ptr{TaggedPtr{N}}, newptr::Ptr, tag) where {N}
+    Base.@_inline_meta
     v = settag(UInt(newptr), N, tag)
     Atomics.atomic_ptr_xchg!(primitive(ptrptr), v)
     return newptr

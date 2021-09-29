@@ -3,20 +3,16 @@ struct CircularBuffer{T}
     tail::Threads.Atomic{Int}
     writelock::Threads.SpinLock
     maxlen::Int
-    buffer::Vector{T}
+    buffer::Vector{Union{Nothing,T}}
 end
 
 # constructors
-function CircularBuffer(buffer::Vector, maxlen::Integer)
+function CircularBuffer{T}(maxlen::Integer) where {T}
     head = Threads.Atomic{Int}(1)
     tail = Threads.Atomic{Int}(1)
     writelock = Threads.SpinLock()
-    return CircularBuffer(head, tail, writelock, maxlen, buffer)
-end
-
-function CircularBuffer(f::F, maxlen::Integer) where {F}
-    buffer = [f(0) for _ in Base.OneTo(maxlen)]
-    return CircularBuffer(buffer, maxlen)
+    buffer = Vector{Union{Nothing,T}}([nothing for _ in Base.OneTo(maxlen)])
+    return CircularBuffer{T}(head, tail, writelock, maxlen, buffer)
 end
 
 # methods
@@ -36,24 +32,45 @@ function Base.length(buffer::CircularBuffer)
 end
 
 Base.trylock(buffer::CircularBuffer) = trylock(buffer.writelock)
+Base.lock(buffer::CircularBuffer) = lock(buffer.writelock)
 Base.unlock(buffer::CircularBuffer) = unlock(buffer.writelock)
 
 Base.@propagate_inbounds function Base.getindex(buffer::CircularBuffer)
     @boundscheck isempty(buffer) && throw(BoundsError(buffer))
-    return buffer.buffer[dec(buffer, head(buffer))]
+    # TODO: Perform this unsafely to avoid the type check?
+    v = buffer.buffer[dec(buffer, head(buffer))]
+    v === nothing && error("Something went wrong")
+    return v
 end
 
 Base.@propagate_inbounds function Base.push!(buffer::CircularBuffer{T}, v::T) where {T}
     @boundscheck isfull(buffer) && throw(BoundsError(buffer))
-    h = head(buffer)
-    @inbounds(buffer.buffer[h] = v)
-    buffer.head[] = inc(buffer, h)
+    i = head(buffer)
+    @inbounds(buffer.buffer[i] = v)
+    buffer.head[] = inc(buffer, i)
     return buffer
 end
 
 # NB: This function is not thread safe.
-# This is mainly for testing.
 function Base.iterate(buffer::CircularBuffer, i = tail(buffer))
     i == head(buffer) && return nothing
     return @inbounds(buffer.buffer[i]), inc(buffer, i)
 end
+
+cleanup!(buffer::CircularBuffer) = cleanup!(_ -> (true, nothing), buffer)
+function cleanup!(f::F, buffer::CircularBuffer) where {F}
+    Base.@lock buffer begin
+        while true
+            isempty(buffer) && return nothing
+            i = tail(buffer)
+            canclean, newval = f(buffer.buffer[i])
+            if canclean
+                buffer.buffer[i] = newval
+                buffer.tail[] = inc(buffer, i)
+            else
+                return nothing
+            end
+        end
+    end
+end
+

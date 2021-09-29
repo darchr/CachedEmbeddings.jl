@@ -49,7 +49,7 @@ end
 
 @testset "Testing CircularBuffer" begin
     # First, test basic functionality of the buffer.
-    buffer = CachedEmbeddings.CircularBuffer(x -> Vector{Int}(undef, x), 5)
+    buffer = CachedEmbeddings.CircularBuffer{Vector{Int}}(5)
     @test CachedEmbeddings.isempty(buffer) == true
     @test CachedEmbeddings.isfull(buffer) == false
     @test length(buffer) == 0
@@ -70,16 +70,15 @@ end
     allocsize = 500
 
     @test Threads.nthreads() > 1
-    buffer = CachedEmbeddings.CircularBuffer(43) do x
-        return CachedEmbeddings.FeatureCache(Vector{Tuple{Int,Int}}(undef, x))
-    end
+    T = CachedEmbeddings.FeatureCache{Vector{Tuple{Int,Int}}}
+    buffer = CachedEmbeddings.CircularBuffer{T}(43)
 
     # Run this tests multiple times, setting the buffer's tail pointer to the head pointer.
     # This will test that the wrap-around functionality is working correctly.
     bigtests = 20
     for _ = 1:bigtests
-        # Effectively empties the buffer
-        buffer.tail[] = buffer.head[]
+        CachedEmbeddings.cleanup!(buffer)
+        @test CachedEmbeddings.isempty(buffer)
         spintest!(buffer, ntests, allocsize)
         # Now - we check the results.
         @test length(buffer) == ceil(Int, ntests / allocsize)
