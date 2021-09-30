@@ -37,4 +37,27 @@
         result = CachedEmbeddings.check(A; clean = true)
         @test CachedEmbeddings.passed(result; verbose = false)
     end
+
+    # Now start multithreading
+    num_generations = 100
+    batchsize = 1024
+    max_cache_length = 5
+    nlookups = 40
+    strategy = EmbeddingTables.PreallocationStrategy()
+    vA = [A]
+    vB = [B]
+
+    for _ in Base.OneTo(num_generations)
+        inds = rand(1:size(base, 2), 40, batchsize)
+        outA = maplookup(strategy, vA, inds)
+        outB = maplookup(strategy, vB, inds)
+        @test outA == outB
+
+        # Set up for the next generation.
+        CachedEmbeddings.next!(A)
+        cache_blocks = length(A.buffer)
+        CachedEmbeddings.unsafe_drop!(A, cache_blocks - max_cache_length)
+        result = CachedEmbeddings.check(A; clean = true)
+        @test CachedEmbeddings.passed(result; verbose = false)
+    end
 end

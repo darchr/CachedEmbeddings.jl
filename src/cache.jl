@@ -12,6 +12,7 @@ end
 maxlength(x::AbstractVector) = length(x)
 maxlength(x::AbstractMatrix) = size(x, 2)
 filledcols(x::FeatureCache) = x.insert[] - 1
+Base.sizeof(x::FeatureCache) = sizeof(x.data)
 
 function FeatureCache(data::C) where {C}
     maxlen = maxlength(data)

@@ -1,11 +1,11 @@
 function table_and_column!(buffer::CircularBuffer{<:FeatureCache}, init::F) where {F}
     # Need to handle the cases where we're starting with an empty cache buffer.
     while isempty(buffer)
-        GC.safepoint()
         if trylock(buffer)
             isempty(buffer) && push!(buffer, init())
             unlock(buffer)
         end
+        GC.safepoint()
     end
 
     cache = buffer[]
@@ -16,7 +16,6 @@ function table_and_column!(buffer::CircularBuffer{<:FeatureCache}, init::F) wher
 
     # Sad Path
     while true
-        GC.safepoint()
         if trylock(buffer)
             # Need to try again after acquiring the lock because a new cache may have
             # been added while we were in the safe point or trying to acquire the lock
@@ -36,6 +35,7 @@ function table_and_column!(buffer::CircularBuffer{<:FeatureCache}, init::F) wher
         cache = @inbounds buffer[]
         col = acquire!(cache)
         col === nothing || return unsafe_unwrap(cache), col
+        GC.safepoint()
     end
 end
 
@@ -84,6 +84,7 @@ end
 const ITEMS_PER_CACHE_BLOCK = 512
 struct DefaultInit{C}
     base::C
+    blocksize::Int
 end
 
 function (f::DefaultInit)()
@@ -92,7 +93,7 @@ function (f::DefaultInit)()
         similar(
             base,
             eltype(base),
-            (featuresize(base) + _pad(eltype(base)), ITEMS_PER_CACHE_BLOCK),
+            (featuresize(base) + _pad(eltype(base)), f.blocksize),
         ),
     )
     return newcache
@@ -101,8 +102,8 @@ end
 function CachedEmbedding{S}(
     base::C,
     ::Val{N};
-    max_buffer_length = 100,
-    init::F = DefaultInit(base),
+    max_buffer_length = 1000,
+    init::F = DefaultInit(base, ITEMS_PER_CACHE_BLOCK),
 ) where {S,N,T,C<:AbstractMatrix{T},F}
     # Initialize the original pointers
     pointers = map(axes(base, 2)) do col
@@ -117,10 +118,13 @@ end
 initialize!(table::CachedEmbedding, v) = push!(table.buffer, FeatureCache(v))
 
 _pad(::Type{Float32}) = 2
+# This level really wants to be inlined because the happy path is quite short.
+# Keep `_columnpointer` non-inlined because it requires a non-trivial amount of work.
 function EmbeddingTables.columnpointer(
     table::CachedEmbedding{<:Any,T},
     i::Integer,
 ) where {T}
+    Base.@_inline_meta
     generation = table.generation
     own, ptr, tag = acquire!(pointer(table.pointers, i), generation)
     # Fast path - just return the pointer
@@ -194,11 +198,15 @@ function unsafe_drop!(
             iszero(backedge) && continue
             table.pointers[backedge] = TaggedPtr{N}(columnpointer(base, backedge))
         end
+        _maybe_free(data)
 
         return (true, nothing)
     end
     return nothing
 end
+
+_maybe_free(_) = nothing
+_maybe_free(x::CachedArrays.CachedArray) = CachedArrays.unsafe_free(x)
 
 # Steps required for `columnpointer`
 # 1. Get ahold of the pointer to the column.

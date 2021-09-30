@@ -48,6 +48,9 @@ function check(table::CachedEmbedding; clean = true)
         push!(cached_columns, col)
         backedge = unsafe_load(Ptr{UInt64}(ptr[] - sizeof(UInt64)))
         valid_backedge_check &= (backedge == col)
+        if backedge != col
+            @show (backedge, col)
+        end
         if clean
             original = EmbeddingTables.columnview(base, col)
             dataptr = Ptr{eltype(original)}(ptr[])
@@ -55,7 +58,7 @@ function check(table::CachedEmbedding; clean = true)
             clean_check &= (cached == original)
         end
     end
-    merge!(results, @dict(cached_columns, valid_backedge_check))
+    merge!(results, @dict(cached_columns, valid_backedge_check, clean_check))
 
     # Unique Backedge Check
     num_holes = 0
