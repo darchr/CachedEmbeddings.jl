@@ -22,7 +22,7 @@ dec(buffer::CircularBuffer, v::T) where {T} =
 
 @inline head(buffer::CircularBuffer) = buffer.head[]
 @inline tail(buffer::CircularBuffer) = buffer.tail[]
-isempty(buffer::CircularBuffer) = (head(buffer) == tail(buffer))
+Base.isempty(buffer::CircularBuffer) = (head(buffer) == tail(buffer))
 isfull(buffer::CircularBuffer) = (inc(buffer, head(buffer)) == tail(buffer))
 
 function Base.length(buffer::CircularBuffer)
@@ -31,9 +31,9 @@ function Base.length(buffer::CircularBuffer)
     return (h >= t) ? (h - t) : ((buffer.maxlen - t) + h)
 end
 
-Base.trylock(buffer::CircularBuffer) = trylock(buffer.writelock)
-Base.lock(buffer::CircularBuffer) = lock(buffer.writelock)
-Base.unlock(buffer::CircularBuffer) = unlock(buffer.writelock)
+@inline Base.trylock(buffer::CircularBuffer) = trylock(buffer.writelock)
+@inline Base.lock(buffer::CircularBuffer) = lock(buffer.writelock)
+@inline Base.unlock(buffer::CircularBuffer) = unlock(buffer.writelock)
 
 Base.@propagate_inbounds function Base.getindex(buffer::CircularBuffer)
     @boundscheck isempty(buffer) && throw(BoundsError(buffer))

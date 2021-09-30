@@ -64,7 +64,7 @@ function check(table::CachedEmbedding; clean = true)
     num_holes = 0
     seen_columns = Set{Int}()
     unique_backedge_check = true
-    for cache in table.buffer
+    for cache in table.cache
         maxcols = filledcols(cache)
         for col in Base.OneTo(maxcols)
             ptr = columnpointer(unsafe_unwrap(cache), col)

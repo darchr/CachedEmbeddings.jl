@@ -14,7 +14,7 @@
 
         # Set up for the next generation.
         CachedEmbeddings.next!(A)
-        cache_blocks = length(A.buffer)
+        cache_blocks = length(A.cache)
         CachedEmbeddings.unsafe_drop!(A, cache_blocks - max_cache_length)
         result = CachedEmbeddings.check(A; clean = true)
         @test CachedEmbeddings.passed(result; verbose = false)
@@ -32,7 +32,7 @@
 
         # Set up for the next generation.
         CachedEmbeddings.next!(A)
-        cache_blocks = length(A.buffer)
+        cache_blocks = length(A.cache)
         CachedEmbeddings.unsafe_drop!(A, cache_blocks - max_cache_length)
         result = CachedEmbeddings.check(A; clean = true)
         @test CachedEmbeddings.passed(result; verbose = false)
@@ -55,7 +55,7 @@
 
         # Set up for the next generation.
         CachedEmbeddings.next!(A)
-        cache_blocks = length(A.buffer)
+        cache_blocks = length(A.cache)
         CachedEmbeddings.unsafe_drop!(A, cache_blocks - max_cache_length)
         result = CachedEmbeddings.check(A; clean = true)
         @test CachedEmbeddings.passed(result; verbose = false)

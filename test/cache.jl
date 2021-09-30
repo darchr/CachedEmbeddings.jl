@@ -1,7 +1,7 @@
-@testset "Testing FeatureCache" begin
+@testset "Testing CachePage" begin
     data = Vector{Tuple{Int,Int}}(undef, 200)
-    cache = CachedEmbeddings.FeatureCache(data)
-    @test isa(cache, CachedEmbeddings.FeatureCache)
+    cache = CachedEmbeddings.CachePage(data)
+    @test isa(cache, CachedEmbeddings.CachePage)
 
     # Make sure we're running with more than 1 thread to accurately measure the concurrency
     # properties of this code.

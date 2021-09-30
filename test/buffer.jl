@@ -1,5 +1,5 @@
 function spintest!(buffer::CachedEmbeddings.CircularBuffer, ntests, allocsize)
-    push!(buffer, CachedEmbeddings.FeatureCache(Vector{Tuple{Int,Int}}(undef, allocsize)))
+    push!(buffer, CachedEmbeddings.CachePage(Vector{Tuple{Int,Int}}(undef, allocsize)))
     @test length(buffer) == 1
     count = Threads.Atomic{Int}(1)
     Threads.@threads for i in Base.OneTo(Threads.nthreads())
@@ -23,7 +23,7 @@ function spintest!(buffer::CachedEmbeddings.CircularBuffer, ntests, allocsize)
 
                         # Still failed, so we definitely need to add a new cache region.
                         if col === nothing
-                            newcache = CachedEmbeddings.FeatureCache(
+                            newcache = CachedEmbeddings.CachePage(
                                 Vector{Tuple{Int,Int}}(undef, allocsize),
                             )
                             push!(buffer, newcache)
@@ -50,7 +50,7 @@ end
 @testset "Testing CircularBuffer" begin
     # First, test basic functionality of the buffer.
     buffer = CachedEmbeddings.CircularBuffer{Vector{Int}}(5)
-    @test CachedEmbeddings.isempty(buffer) == true
+    @test isempty(buffer) == true
     @test CachedEmbeddings.isfull(buffer) == false
     @test length(buffer) == 0
 
@@ -59,7 +59,7 @@ end
         @test trylock(buffer) == true
         @test trylock(buffer) == false
         push!(buffer, [5])
-        @test CachedEmbeddings.isempty(buffer) == false
+        @test isempty(buffer) == false
         @test CachedEmbeddings.isfull(buffer) == false
         @test length(buffer) == 1
     finally
@@ -70,7 +70,7 @@ end
     allocsize = 500
 
     @test Threads.nthreads() > 1
-    T = CachedEmbeddings.FeatureCache{Vector{Tuple{Int,Int}}}
+    T = CachedEmbeddings.CachePage{Vector{Tuple{Int,Int}}}
     buffer = CachedEmbeddings.CircularBuffer{T}(43)
 
     # Run this tests multiple times, setting the buffer's tail pointer to the head pointer.
@@ -78,7 +78,7 @@ end
     bigtests = 20
     for _ = 1:bigtests
         CachedEmbeddings.cleanup!(buffer)
-        @test CachedEmbeddings.isempty(buffer)
+        @test isempty(buffer)
         spintest!(buffer, ntests, allocsize)
         # Now - we check the results.
         @test length(buffer) == ceil(Int, ntests / allocsize)

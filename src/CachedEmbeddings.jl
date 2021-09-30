@@ -8,6 +8,7 @@ import EmbeddingTables: EmbeddingTables, AbstractEmbeddingTable, columnpointer, 
 
 # deps
 import Dictionaries
+import StaticArrays: SVector
 import StrideArraysCore
 
 macro dict(syms...)
