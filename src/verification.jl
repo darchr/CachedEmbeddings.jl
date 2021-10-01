@@ -23,7 +23,7 @@ function check(table::CachedEmbedding; clean = true)
 
     pointers = table.pointers
     pointer_tag_check = true
-    for ptr in pointers
+    for (ptr, _) in pointers
         tag = gettag(ptr)
         push!(seen_generations, tag)
         if iszero(tag)
@@ -40,13 +40,13 @@ function check(table::CachedEmbedding; clean = true)
     cached_columns = Set{Int}()
     valid_backedge_check = true
     clean_check = true
-    for (col, ptr) in enumerate(pointers)
+    for (col, (ptr, backedge_ptr)) in enumerate(pointers)
         tag = gettag(ptr)
         iszero(tag) && continue
         # We have a cached feature.
         # Make sure its backedge is set correctly.
         push!(cached_columns, col)
-        backedge = unsafe_load(Ptr{UInt64}(ptr[] - sizeof(UInt64)))
+        backedge = unsafe_load(backedge_ptr)
         valid_backedge_check &= (backedge == col)
         if backedge != col
             @show (backedge, col)
@@ -67,9 +67,10 @@ function check(table::CachedEmbedding; clean = true)
     for cache in table.cache
         maxcols = filledcols(cache)
         for col in Base.OneTo(maxcols)
-            ptr = columnpointer(unsafe_unwrap(cache), col)
+            #ptr = columnpointer(unsafe_unwrap(cache), col)
             # First load should be the backedge.
-            backedge = unsafe_load(Ptr{UInt64}(ptr))
+            #backedge = unsafe_load(Ptr{UInt64}(ptr))
+            backedge = cache.backedges[col]
             if iszero(backedge)
                 num_holes += 1
             else

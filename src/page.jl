@@ -5,6 +5,7 @@ struct CachePage{C <: AbstractArray}
 
     # The cached data.
     # N.B. - This may optionally include more metadata than just the pure data array.
+    backedges::Vector{UInt64}
     data::C
 end
 
@@ -17,8 +18,9 @@ reset!(x::CachePage) = (x.insert[] = 1)
 
 function CachePage(data::C) where {C}
     maxlen = maxlength(data)
+    backedges = zeros(UInt64, maxlen)
     insert = Threads.Atomic{Int}(1)
-    return CachePage(insert, maxlen, data)
+    return CachePage(insert, maxlen, backedges, data)
 end
 
 """
@@ -43,4 +45,4 @@ Return the raw data array wrapped by `cache`.
 The underlying data should only be accessed on the slice provided by a call to
 `acquire!(cache)`.
 """
-unsafe_unwrap(cache::CachePage) = cache.data
+unsafe_unwrap(cache::CachePage) = cache.data, cache.backedges

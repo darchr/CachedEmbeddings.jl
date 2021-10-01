@@ -6,6 +6,7 @@ TaggedPtr{N}(ptr::Ptr) where {N} = TaggedPtr{N}(UInt(ptr) & ~mask(N))
 
 @inline value(x::TaggedPtr) = x.value
 @inline primitive(ptr::Ptr{TaggedPtr{N}}) where {N} = Ptr{UInt}(ptr)
+@inline primitive(ptr::Ptr{Tuple{TaggedPtr{N},Ptr{T}}}) where {N,T} = Ptr{UInt}(ptr)
 
 function Base.show(io::IO, ptr::TaggedPtr{N}) where {N}
     print(io, "Tagged Ptr: ($(ptr[]), $(gettag(ptr)))")
@@ -59,9 +60,17 @@ This function is (at least, **SHOULD** be) threadsafe.
     return acquire!(TaggedPtr{N}, primitive(ptr), tag)
 end
 
-function update_with_tag!(ptrptr::Ptr{TaggedPtr{N}}, newptr::Ptr, tag) where {N}
+function update_with_tag!(
+    ptrptr::Ptr{Tuple{TaggedPtr{N},Ptr{UInt64}}},
+    newptr::Ptr,
+    backedge_ptr::Ptr{UInt64},
+    tag,
+) where {N}
     Base.@_inline_meta
-    v = settag(UInt(newptr), N, tag)
-    Atomics.atomic_ptr_xchg!(primitive(ptrptr), v)
+    unsafe_store!(Ptr{UInt64}(ptrptr + sizeof(TaggedPtr{N})), backedge_ptr)
+
+    # atomic_ptr_xchg! has acquire and release semantics, so we're guarenteed for our
+    # store of the backedge commits and is visible after the atomic exchange below.
+    Atomics.atomic_ptr_xchg!(primitive(ptrptr), settag(UInt(newptr), N, tag))
     return newptr
 end

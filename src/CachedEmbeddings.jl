@@ -2,13 +2,21 @@ module CachedEmbeddings
 
 # "internal" deps
 import CachedArrays: CachedArrays, CachedArray
-import EmbeddingTables: EmbeddingTables, AbstractEmbeddingTable, columnpointer, featuresize
+import EmbeddingTables:
+    EmbeddingTables,
+    AbstractEmbeddingTable,
+    columnpointer,
+    featuresize,
+    IndexingContext,
+    Forward,
+    Update
 
 # stdlib
 
 # deps
 import Dictionaries
-import StaticArrays: SVector
+import Polyester
+import SIMD
 import StrideArraysCore
 
 macro dict(syms...)
@@ -21,7 +29,8 @@ include("atomics.jl")
 import .Atomics: Atomics
 include("buffer.jl")
 include("tagged.jl")
-include("cache.jl")
+include("page.jl")
+include("nontemporal.jl")
 include("table.jl")
 include("verification.jl")
 
