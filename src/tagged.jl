@@ -3,16 +3,36 @@ struct TaggedPtr{N}
 end
 
 TaggedPtr{N}(ptr::Ptr) where {N} = TaggedPtr{N}(UInt(ptr) & ~mask(N))
-
 @inline value(x::TaggedPtr) = x.value
-@inline primitive(ptr::Ptr{TaggedPtr{N}}) where {N} = Ptr{UInt}(ptr)
-@inline primitive(ptr::Ptr{Tuple{TaggedPtr{N},Ptr{T}}}) where {N,T} = Ptr{UInt}(ptr)
+
+struct TaggedPtrPair{N}
+    tagged::TaggedPtr{N}
+    backedge::Ptr{UInt64}
+end
+TaggedPtrPair{N}(v) where {N} = TaggedPtrPair{N}(TaggedPtr{N}(v), Ptr{UInt64}())
+@inline follow(::Type{T}, x::TaggedPtrPair) where {T} = Ptr{T}(getindex(x.tagged))
+getbackedge(x::TaggedPtrPair) = x.backedge
+function Base.indexed_iterate(x::TaggedPtrPair, i::Int, _ = nothing)
+    if i == 1
+        return (x.tagged, i+1)
+    elseif i == 2
+        return (x.backedge, i+1)
+    else
+        throw(BoundsError(x, i))
+    end
+end
+
+const MaybePair{N} = Union{TaggedPtr{N},TaggedPtrPair{N}}
+
+@inline primitive(ptr::Ptr{<:MaybePair{N}}) where {N} = Ptr{UInt}(ptr)
 
 function Base.show(io::IO, ptr::TaggedPtr{N}) where {N}
     print(io, "Tagged Ptr: ($(ptr[]), $(gettag(ptr)))")
 end
+
 @inline Base.getindex(x::TaggedPtr{N}) where {N} = Ptr{Nothing}(value(x) & ~mask(N))
 
+@inline gettag(v::TaggedPtrPair) = gettag(v.tagged)
 @inline gettag(v::TaggedPtr{N}) where {N} = gettag(value(v), N)
 @inline gettag(v::UInt, nbits) = v & mask(nbits)
 
@@ -25,6 +45,7 @@ end
 @inline mask(n) = mask(UInt, n)
 @inline mask(::Type{T}, n) where {T} = (T(2)^n) - one(T)
 
+@inline iscached(v::TaggedPtrPair, tag) = iscached(v.tagged, tag)
 @inline iscached(v::TaggedPtr{N}, tag) where {N} = iscached(value(v), N, tag)
 @inline iscached(v::UInt, n, tag) = (gettag(v, n) == tag)
 
@@ -56,12 +77,12 @@ The final return element is the potentially old tag for the returned pointer.
 
 This function is (at least, **SHOULD** be) threadsafe.
 """
-@inline function acquire!(ptr::Ptr{TaggedPtr{N}}, tag) where {N}
+@inline function acquire!(ptr::Ptr{<:MaybePair{N}}, tag) where {N}
     return acquire!(TaggedPtr{N}, primitive(ptr), tag)
 end
 
 function update_with_tag!(
-    ptrptr::Ptr{Tuple{TaggedPtr{N},Ptr{UInt64}}},
+    ptrptr::Ptr{TaggedPtrPair{N}},
     newptr::Ptr,
     backedge_ptr::Ptr{UInt64},
     tag,

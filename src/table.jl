@@ -15,7 +15,7 @@
 * `F` - Type of the cache block initialization function.
 """
 mutable struct CachedEmbedding{S,T,C<:AbstractMatrix,N,F} <: AbstractEmbeddingTable{S,T}
-    pointers::Vector{Tuple{TaggedPtr{N},Ptr{UInt64}}}
+    pointers::Vector{TaggedPtrPair{N}}
     # Remote store
     base::C
     cache::CircularBuffer{CachePage{C}}
@@ -158,7 +158,7 @@ function CachedEmbedding{S}(
 ) where {S,N,T,C<:AbstractMatrix{T},F}
     # Initialize the original pointers
     pointers = map(axes(base, 2)) do col
-        return (TaggedPtr{N}(columnpointer(base, col)), Ptr{UInt64}())
+        return TaggedPtrPair{N}(columnpointer(base, col))
     end
     cache = CircularBuffer{CachePage{C}}(max_buffer_length)
     pagecache = Vector{CachePage{C}}()
@@ -175,23 +175,29 @@ function CachedEmbedding{S}(
     )
 end
 
-# TODO: Get rid of this.
 settarget!(table::CachedEmbedding, bytes) = table.targetbytes = bytes
-settarget!(bytes::Integer) = Base.Fix2(settarget!, bytes)
-
 setreserve!(table::CachedEmbedding, bytes) = table.targetreserve = bytes
-setreserve!(bytes::Integer) = Base.Fix2(setreserve!, bytes)
+disable!(table::CachedEmbedding) = (table.generation = 0)
+enable!(table::CachedEmbedding) = (table.generation = 1)
 
-function taggedpointer(pointers::Vector{Tuple{TaggedPtr{N},Ptr{UInt64}}}, i) where {N}
+function taggedpointer(pointers::Vector{TaggedPtrPair{N}}, i) where {N}
     return Ptr{TaggedPtr{N}}(pointer(pointers, i))
 end
 
+function settags!(table::CachedEmbedding{<:Any,<:Any,<:Any,N}, tag) where {N}
+    pointers = table.pointers
+    for i in eachindex(pointers)
+        ptr, backedge = pointers[i]
+        update_with_tag!(pointer(pointers, i), ptr[], backedge, tag)
+    end
+end
+
 Base.@propagate_inbounds function backedgepointer(
-    pointers::Vector{Tuple{TaggedPtr{N},Ptr{UInt64}}},
+    pointers::Vector{TaggedPtrPair{N}},
     i,
 ) where {N}
     @boundscheck checkbounds(pointers, i)
-    return getindex(@inbounds(pointers[i]), 2)
+    return getfield(@inbounds(pointers[i]), :backedge)
 end
 
 function EmbeddingTables.columnview(
@@ -199,10 +205,21 @@ function EmbeddingTables.columnview(
     i::Integer,
     context::EmbeddingTables.IndexingContext,
 )
+    Base.@_inline_meta
     return StrideArraysCore.PtrArray(
         columnpointer(table, i, context),
         (EmbeddingTables.featuresize(table),),
     )
+end
+
+function EmbeddingTables.columnview(
+    table::CachedEmbedding,
+    _,
+    i::Integer,
+    context::EmbeddingTables.IndexingContext,
+)
+    Base.@_inline_meta
+    return EmbeddingTables.columnview(table, i, context)
 end
 
 # In the updating context, don't try to do any data movement.
@@ -212,8 +229,7 @@ function EmbeddingTables.columnpointer(
     ::EmbeddingTables.Update,
 ) where {T}
     Base.@_inline_meta
-    # Wow ... this signature is UGLY.
-    return Ptr{T}(table.pointers[i][1][])
+    return follow(T, table.pointers[i])
 end
 
 # This level really wants to be inlined because the happy path is quite short.
@@ -231,30 +247,26 @@ function EmbeddingTables.columnpointer(
         return Ptr{T}(ptr)
     else
         backedge = backedgepointer(table.pointers, i)
-        return _columnpointer(table, Ptr{T}(ptr), tag, backedge, i)
+        return _columnpointer!(table, Ptr{T}(ptr), tag, backedge, i)
     end
 end
 
 const TIMES = [Vector{Int}() for _ in Base.OneTo(Threads.nthreads())]
 
-function _columnpointer(
-    table::CachedEmbedding{EmbeddingTables.Static{N},T},
+function _columnpointer!(
+    table::CachedEmbedding{<:Any,T},
     ptr::Ptr{T},
     tag,
     backedge::Ptr{UInt64},
     i,
-) where {N,T}
+) where {T}
     generation = table.generation
 
     # Slow path - need to copy the data array.
-    #data, col = table_and_column!(table.cache, table.pagecache, table.init)
     data, backedges, col = table_and_column!(table)
 
     # Store the original column in the first region of data
     @inbounds backedges[col] = i
-    # dst_ptr = columnpointer(data, col)
-    # setbackedge!(dst_ptr, unsigned(i), false)
-    # dst_ptr += sizeof(UInt64)
 
     # Copy over data
     # start = time_ns()
@@ -269,13 +281,33 @@ function _columnpointer(
 
     # If the original tag is not zero, then we need to clear the backedge for the old
     # cache location.
-    #iszero(tag) || setbackedge!(ptr, zero(UInt64))
     iszero(tag) || unsafe_store!(backedge, zero(UInt64))
 
     # Update original pointer and return
     backedge_ptr = pointer(backedges, col)
     update_with_tag!(pointer(table.pointers, i), dst_ptr, backedge_ptr, generation)
     return Ptr{T}(dst_ptr)
+end
+
+#####
+##### Static Preparation
+#####
+
+function prepopulate!(table::CachedEmbedding{<:Any,T}, tag) where {T}
+    targetbytes = table.targetbytes
+    nvectors = min(
+        size(table, 2),
+        div(targetbytes, sizeof(eltype(table)) * featuresize(table))
+    )
+    pointers = table.pointers
+    for v in Base.OneTo(nvectors)
+        own, ptr, _tag = acquire!(taggedpointer(pointers, v), tag)
+        if own
+            backedge = backedgepointer(pointers, v)
+            _columnpointer!(table, Ptr{T}(ptr), _tag, backedge, v)
+        end
+    end
+    return nothing
 end
 
 #####
@@ -311,8 +343,7 @@ function unsafe_drop!(
             # Otherwise, we need to update the top level pointer back to its original
             # location.
             iszero(backedge) && continue
-            table.pointers[backedge] =
-                (TaggedPtr{N}(columnpointer(base, backedge)), Ptr{UInt64}())
+            table.pointers[backedge] = TaggedPtrPair{N}(columnpointer(base, backedge))
             @inbounds backedges[col] = zero(UInt64)
         end
 
@@ -363,10 +394,18 @@ _maybe_free(x::CachePage{<:CachedArrays.CachedArray}) = _maybe_free(unsafe_unwra
 
 const Ensemble = AbstractVector{<:CachedEmbedding}
 
-settarget!(tables::Ensemble, bytes) = foreach(settarget!(bytes), tables)
-setreserve!(tables::Ensemble, bytes) = foreach(setreserve!(bytes), tables)
-next!(tables::Ensemble) = foreach(next!, tables)
-unsafe_cleanup!(tables::Ensemble) = foreach(unsafe_cleanup!, tables)
+macro forward_ensemble(f, args...)
+    f = esc(f)
+    args = map(esc, args)
+    return :($f(tables::Ensemble, $(args...)) = foreach(x -> $f(x, $(args...)), tables))
+end
+
+@forward_ensemble settarget! bytes
+@forward_ensemble setreserve! bytes
+@forward_ensemble next!
+@forward_ensemble unsafe_cleanup!
+@forward_ensemble disable!
+@forward_ensemble enable!
 
 #####
 ##### Writebacks
@@ -421,6 +460,8 @@ function writeback!(tables::Ensemble, splitsize = 4, nthreads = 12)
     # Next, use our poor man's load balancing to divide up the work among threads.
     count = Threads.Atomic{Int}(1)
     divisor = length(work)
+    divisor == 0 && return nothing
+
     len = divisor * splitsize
     Polyester.@batch (per = core) for i in Base.OneTo(nthreads)
         while true
@@ -469,8 +510,7 @@ function writeback!(
 
         # Zero out the saved backedge for safety.
         @inbounds backedges[datacol] = zero(eltype(backedges))
-        table.pointers[backedge] =
-            (TaggedPtr{N}(columnpointer(base, backedge)), Ptr{UInt64}(0))
+        table.pointers[backedge] = TaggedPtrPair{N}(columnpointer(base, backedge))
     end
 end
 

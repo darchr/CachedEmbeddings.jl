@@ -20,15 +20,15 @@
     @test CachedEmbeddings.iscached(p, 5) == true
 
     # Test `acquire`
-    x = Vector{Tuple{CachedEmbeddings.TaggedPtr{3},Ptr{UInt64}}}()
-    push!(x, (CachedEmbeddings.TaggedPtr{3}(0), Ptr{UInt64}()))
+    x = Vector{CachedEmbeddings.TaggedPtrPair{3}}()
+    push!(x, CachedEmbeddings.TaggedPtrPair{3}(0))
     own, val = CachedEmbeddings.acquire!(CachedEmbeddings.taggedpointer(x, 1), 1)
     @test own == true
     @test val == Ptr{Nothing}(0)
 
     # Second time should return false since this `TaggedPtr` is now owned.
-    @test CachedEmbeddings.gettag(x[1][1]) == 1
-    @test CachedEmbeddings.iscached(x[1][1], 1) == true
+    @test CachedEmbeddings.gettag(x[1].tagged) == 1
+    @test CachedEmbeddings.iscached(x[1].tagged, 1) == true
     own, val = CachedEmbeddings.acquire!(CachedEmbeddings.taggedpointer(x, 1), 1)
     @test own == false
     @test val == Ptr{Nothing}(0)
@@ -37,7 +37,7 @@
     newptr = Ptr{Nothing}(typemax(UInt) & ~7)
     ptr = CachedEmbeddings.update_with_tag!(pointer(x, 1), newptr, Ptr{UInt64}(1), 5)
     @test ptr == newptr
-    @test CachedEmbeddings.gettag(x[1][1]) == 5
-    @test x[1][2] == Ptr{UInt64}(1)
-    @test x[1][1][] == newptr
+    @test CachedEmbeddings.gettag(x[1].tagged) == 5
+    @test x[1].backedge == Ptr{UInt64}(1)
+    @test CachedEmbeddings.follow(Nothing, x[1]) == newptr
 end
