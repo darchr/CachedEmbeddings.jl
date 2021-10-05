@@ -30,16 +30,15 @@ mutable struct CachedEmbedding{S,T,C<:AbstractMatrix,N,F} <: AbstractEmbeddingTa
     targetreserve::Int
 end
 
-Base.IndexStyle(::CachedEmbedding) = Base.IndexCartesian()
-Base.size(A::CachedEmbedding) = size(A.base)
+@inline Base.size(A::CachedEmbedding) = size(A.base)
 
-function Base.getindex(A::CachedEmbedding, (i, j)::Vararg{Int,2})
-    return Base.unsafe_load(columnpointer(A, j, Update()), i)
-end
-
-function Base.setindex!(A::CachedEmbedding, v, (i, j)::Vararg{Int,2})
-    return Base.unsafe_store!(columnpointer(A, j, Update()), i)
-end
+# function Base.getindex(A::CachedEmbedding, (i, j)::Vararg{Int,2})
+#     return Base.unsafe_load(columnpointer(A, j, Update()), i)
+# end
+#
+# function Base.setindex!(A::CachedEmbedding, v, (i, j)::Vararg{Int,2})
+#     return Base.unsafe_store!(columnpointer(A, j, Update()), i)
+# end
 nbits(::CachedEmbedding{<:Any,<:Any,<:Any,N}) where {N} = N
 EmbeddingTables.example(A::CachedEmbedding) = A.base
 
@@ -200,33 +199,11 @@ Base.@propagate_inbounds function backedgepointer(
     return getfield(@inbounds(pointers[i]), :backedge)
 end
 
-function EmbeddingTables.columnview(
-    table::CachedEmbedding,
-    i::Integer,
-    context::EmbeddingTables.IndexingContext,
-)
-    Base.@_inline_meta
-    return StrideArraysCore.PtrArray(
-        columnpointer(table, i, context),
-        (EmbeddingTables.featuresize(table),),
-    )
-end
-
-function EmbeddingTables.columnview(
-    table::CachedEmbedding,
-    _,
-    i::Integer,
-    context::EmbeddingTables.IndexingContext,
-)
-    Base.@_inline_meta
-    return EmbeddingTables.columnview(table, i, context)
-end
-
-# In the updating context, don't try to do any data movement.
+# In a generic indexing context, don't try to move any data, simply return the pointer
 function EmbeddingTables.columnpointer(
     table::CachedEmbedding{<:Any,T},
     i::Integer,
-    ::EmbeddingTables.Update,
+    ::EmbeddingTables.IndexingContext,
 ) where {T}
     Base.@_inline_meta
     return follow(T, table.pointers[i])
@@ -269,15 +246,12 @@ function _columnpointer!(
     @inbounds backedges[col] = i
 
     # Copy over data
-    # start = time_ns()
     dst_ptr = columnpointer(data, col)
     for j in axes(table, 1)
         EmbeddingTables.@_ivdep_meta
         EmbeddingTables.@_interleave_meta(8)
         unsafe_store!(dst_ptr, unsafe_load(ptr, j), j)
     end
-    # stop = time_ns()
-    # push!(TIMES[Threads.threadid()], stop - start)
 
     # If the original tag is not zero, then we need to clear the backedge for the old
     # cache location.
@@ -295,10 +269,8 @@ end
 
 function prepopulate!(table::CachedEmbedding{<:Any,T}, tag) where {T}
     targetbytes = table.targetbytes
-    nvectors = min(
-        size(table, 2),
-        div(targetbytes, sizeof(eltype(table)) * featuresize(table))
-    )
+    nvectors =
+        min(size(table, 2), div(targetbytes, sizeof(eltype(table)) * featuresize(table)))
     pointers = table.pointers
     for v in Base.OneTo(nvectors)
         own, ptr, _tag = acquire!(taggedpointer(pointers, v), tag)
@@ -515,7 +487,6 @@ function writeback!(
 end
 
 const AVX512BYTES = 64
-
 @generated function Base.copyto!(
     ::Type{EmbeddingTables.Static{N}},
     dst::Ptr{T},
