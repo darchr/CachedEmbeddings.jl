@@ -24,7 +24,7 @@ function spintest!(buffer::CachedEmbeddings.CircularBuffer, ntests, allocsize)
                         # Still failed, so we definitely need to add a new cache region.
                         if col === nothing
                             newcache = CachedEmbeddings.CachePage(
-                                Vector{Tuple{Int,Int}}(undef, allocsize),
+                                Vector{Tuple{Int,Int}}(undef, allocsize)
                             )
                             push!(buffer, newcache)
 
@@ -44,7 +44,6 @@ function spintest!(buffer::CachedEmbeddings.CircularBuffer, ntests, allocsize)
             end
         end
     end
-
 end
 
 @testset "Testing CircularBuffer" begin
@@ -76,7 +75,7 @@ end
     # Run this tests multiple times, setting the buffer's tail pointer to the head pointer.
     # This will test that the wrap-around functionality is working correctly.
     bigtests = 20
-    for _ = 1:bigtests
+    for _ in 1:bigtests
         CachedEmbeddings.cleanup!(buffer)
         @test isempty(buffer)
         spintest!(buffer, ntests, allocsize)

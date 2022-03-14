@@ -7,6 +7,7 @@ import EmbeddingTables:
     AbstractEmbeddingTable,
     columnpointer,
     featuresize,
+    example,
     IndexingContext,
     Forward,
     Update

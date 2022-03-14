@@ -17,8 +17,9 @@ end
 
 # methods
 inc(buffer::CircularBuffer, v) = (v == buffer.maxlen) ? one(v) : (v + one(v))
-dec(buffer::CircularBuffer, v::T) where {T} =
-    (isone(v)) ? convert(T, buffer.maxlen) : (v - one(v))
+function dec(buffer::CircularBuffer, v::T) where {T}
+    return (isone(v)) ? convert(T, buffer.maxlen) : (v - one(v))
+end
 
 @inline head(buffer::CircularBuffer) = buffer.head[]
 @inline tail(buffer::CircularBuffer) = buffer.tail[]
@@ -35,18 +36,22 @@ end
 @inline Base.lock(buffer::CircularBuffer) = lock(buffer.writelock)
 @inline Base.unlock(buffer::CircularBuffer) = unlock(buffer.writelock)
 
-Base.@propagate_inbounds function Base.getindex(buffer::CircularBuffer)
-    @boundscheck isempty(buffer) && throw(BoundsError(buffer))
+function Base.getindex(buffer::CircularBuffer)
+    isempty(buffer) && return nothing
     # TODO: Perform this unsafely to avoid the type check?
-    v = buffer.buffer[dec(buffer, head(buffer))]
-    v === nothing && error("Something went wrong")
-    return v
+    return buffer.buffer[dec(buffer, head(buffer))]
 end
 
 Base.@propagate_inbounds function Base.push!(buffer::CircularBuffer{T}, v::T) where {T}
     @boundscheck isfull(buffer) && throw(BoundsError(buffer))
     i = head(buffer)
     @inbounds(buffer.buffer[i] = v)
+    # Perform an atomic write to head.
+    # The write will ensure that all previous stores (i.e., update to underlying vector)
+    # are visible before the write completes.o
+    #
+    # In other words, no chance of another thread seeing the head be incremented BEFORE
+    # the writes to the underlying buffere are complete.
     buffer.head[] = inc(buffer, i)
     return buffer
 end
@@ -73,4 +78,3 @@ function cleanup!(f::F, buffer::CircularBuffer) where {F}
         end
     end
 end
-

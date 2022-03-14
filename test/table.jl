@@ -1,6 +1,8 @@
 @testset "Testing Table Mechanics" begin
     base = rand(Float32, 16, 10_000)
     A = CachedEmbeddings.CachedEmbedding{Static{featuresize(base)}}(base, Val(3))
+    @test CachedEmbeddings.nbits(A) == 3
+    @test CachedEmbeddings.strategy(A) == CachedEmbeddings.BlockBased()
     B = SimpleEmbedding{Static{featuresize(base)}}(base)
 
     # Single Lookups
@@ -76,7 +78,7 @@ end
         # Target roughly 5 batches in the cache with 2 batches in reserve
         targetbytes = 5 * featuresize * batchsize * sizeof(Float32),
         targetreserve = 2 * featuresize * batchsize * sizeof(Float32),
-        init = CachedEmbeddings.DefaultInit(base, batchsize)
+        init = CachedEmbeddings.DefaultInit(base, batchsize),
     )
 
     opt = EmbeddingTables.Flux.Descent(1.0)
@@ -123,7 +125,9 @@ end
 
     # Performing a writeback should not change the apparent state of the cache.
     CachedEmbeddings.writeback!([cached])
-    @test CachedEmbeddings.passed(CachedEmbeddings.check(cached; clean = false); verbose = false)
+    @test CachedEmbeddings.passed(
+        CachedEmbeddings.check(cached; clean = false); verbose = false
+    )
     @test cached == reference
 
     @test length(cached.cache) == 5

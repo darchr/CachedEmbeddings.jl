@@ -14,9 +14,9 @@ TaggedPtrPair{N}(v) where {N} = TaggedPtrPair{N}(TaggedPtr{N}(v), Ptr{UInt64}())
 getbackedge(x::TaggedPtrPair) = x.backedge
 function Base.indexed_iterate(x::TaggedPtrPair, i::Int, _ = nothing)
     if i == 1
-        return (x.tagged, i+1)
+        return (x.tagged, i + 1)
     elseif i == 2
-        return (x.backedge, i+1)
+        return (x.backedge, i + 1)
     else
         throw(BoundsError(x, i))
     end
@@ -27,7 +27,7 @@ const MaybePair{N} = Union{TaggedPtr{N},TaggedPtrPair{N}}
 @inline primitive(ptr::Ptr{<:MaybePair{N}}) where {N} = Ptr{UInt}(ptr)
 
 function Base.show(io::IO, ptr::TaggedPtr{N}) where {N}
-    print(io, "Tagged Ptr: ($(ptr[]), $(gettag(ptr)))")
+    return print(io, "Tagged Ptr: ($(ptr[]), $(gettag(ptr)))")
 end
 
 @inline Base.getindex(x::TaggedPtr{N}) where {N} = Ptr{Nothing}(value(x) & ~mask(N))
@@ -82,10 +82,7 @@ This function is (at least, **SHOULD** be) threadsafe.
 end
 
 function update_with_tag!(
-    ptrptr::Ptr{TaggedPtrPair{N}},
-    newptr::Ptr,
-    backedge_ptr::Ptr{UInt64},
-    tag,
+    ptrptr::Ptr{TaggedPtrPair{N}}, newptr::Ptr, backedge_ptr::Ptr{UInt64}, tag
 ) where {N}
     Base.@_inline_meta
     unsafe_store!(Ptr{UInt64}(ptrptr + sizeof(TaggedPtr{N})), backedge_ptr)

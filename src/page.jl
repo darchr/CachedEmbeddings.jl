@@ -1,4 +1,4 @@
-struct CachePage{C <: AbstractArray}
+struct CachePage{C<:AbstractArray}
     # How many valid features are in this cache
     insert::Threads.Atomic{Int}
     maxlen::Int

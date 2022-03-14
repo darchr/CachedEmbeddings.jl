@@ -3,18 +3,36 @@
 #####
 
 # TODO: What if we can't cache the whole ensemble lookup?
+abstract type AbstractEmbeddingStrategy end
+struct BlockBased <: AbstractEmbeddingStrategy end
+
+struct GenerationBased <: AbstractEmbeddingStrategy
+    current_generations::Vector{Int}
+end
+GenerationBased() = GenerationBased(Int[])
+
+Base.length(v::GenerationBased) = length(v.current_generations)
+function Base.popfirst!(v::GenerationBased)
+    return popfirst_and_shift(v.current_generations)
+end
+function Base.push!(v::GenerationBased, generation::Integer)
+    return push!(v.current_generations, generation)
+end
 
 """
-    CachedEmbedding{S,T,C <: AbstractArray,N,U}
+    CachedEmbedding{S,T,G,C <: AbstractArray,N,F}
 
 ## Type Parameters
 * `S` - EmbeddingTables lookup type.
 * `T` - Embedding table element type.
+* `G` - CachingStratetgy
 * `C` - The type of the base data array.
 * `N` - Number of tag bits.
 * `F` - Type of the cache block initialization function.
 """
-mutable struct CachedEmbedding{S,T,C<:AbstractMatrix,N,F} <: AbstractEmbeddingTable{S,T}
+mutable struct CachedEmbedding{S,T,G<:AbstractEmbeddingStrategy,C<:AbstractMatrix,N,F} <:
+               AbstractEmbeddingTable{S,T}
+    strategy::G
     pointers::Vector{TaggedPtrPair{N}}
     # Remote store
     base::C
@@ -30,60 +48,71 @@ mutable struct CachedEmbedding{S,T,C<:AbstractMatrix,N,F} <: AbstractEmbeddingTa
     targetreserve::Int
 end
 
+# Aliases
+const BlockBasedEmbedding{S,T} = CachedEmbedding{S,T,BlockBased}
+const GenerationBasedEmbedding{S,T} = CachedEmbedding{S,T,GenerationBased}
+
+# Simple Functions
 @inline Base.size(A::CachedEmbedding) = size(A.base)
+@inline strategy(A::CachedEmbedding) = A.strategy
 
-# function Base.getindex(A::CachedEmbedding, (i, j)::Vararg{Int,2})
-#     return Base.unsafe_load(columnpointer(A, j, Update()), i)
-# end
-#
-# function Base.setindex!(A::CachedEmbedding, v, (i, j)::Vararg{Int,2})
-#     return Base.unsafe_store!(columnpointer(A, j, Update()), i)
-# end
-nbits(::CachedEmbedding{<:Any,<:Any,<:Any,N}) where {N} = N
+nbits(::CachedEmbedding{<:Any,<:Any,<:Any,<:Any,N}) where {N} = N
 EmbeddingTables.example(A::CachedEmbedding) = A.base
+arraytype(::CachedEmbedding{<:Any,<:Any,<:Any,C}) where {C} = C
 
+@inline function base_addresses(table::CachedEmbedding{S,T}) where {S,T}
+    (; base) = table
+    base_address = UInt(pointer(base))
+    length = sizeof(base)
+    return base_address:(base_address + length - sizeof(T))
+end
+
+function inbase(ptr::Ptr{T}, table::CachedEmbedding{S,T}) where {S,T}
+    return in(UInt(ptr), base_addresses(table))
+end
+
+"""
+    table_and_column!(table::CachedEmbedding) -> (AbstractMatrix, AbstractVector, Int)
+
+Return a 3-tuple containing (1) an opaque matrix of data, (2) an opaque vector of backedge
+pointers, and (3) an index `i`.
+
+With these returned items, it is safe to mutate the matrix along column `i` and the back
+edge vector at entry `i`.
+"""
 function table_and_column!(table::CachedEmbedding)
-    buffer, pagecache, init = table.cache, table.pagecache, table.init
-    # Need to handle the cases where we're starting with an empty cache buffer.
-    # Always check the pagecache first.
-    # Only fall back to explicitly requesting more memory if the pagecache is empty.
-    while isempty(buffer)
-        if trylock(buffer)
-            page = isempty(pagecache) ? init() : pop!(pagecache)
-            push!(buffer, page)
-            unlock(buffer)
-        end
-        GC.safepoint()
-    end
+    (; cache, pagecache, init) = table
 
-    cache = @inbounds buffer[]
-    col = acquire!(cache)
-
-    # Happy Path
-    col === nothing || return (unsafe_unwrap(cache)..., col)
-
-    # Sad Path
     while true
-        if trylock(buffer)
+        # Happy path
+        page = cache[]
+        if page !== nothing
+            col = acquire!(page)
+            col === nothing || return (unsafe_unwrap(page)..., col)
+        end
+
+        # Sad path
+        if trylock(cache)
             # Need to try again after acquiring the lock because a new cache may have
             # been added while we were in the safe point or trying to acquire the lock
             # in the first place.
-            cache = @inbounds buffer[]
-            col = acquire!(cache)
-            if col === nothing
-                page = isempty(pagecache) ? init() : pop!(pagecache)
-                push!(buffer, page)
+            page = cache[]
+            if page === nothing
+                @assert isempty(cache)
+                push!(cache, isempty(pagecache) ? init() : pop!(pagecache))
             else
-                unlock(buffer)
-                return (unsafe_unwrap(cache)..., col)
+                col = acquire!(page)
+                if col === nothing
+                    push!(cache, isempty(pagecache) ? init() : pop!(pagecache))
+                else
+                    unlock(cache)
+                    return (unsafe_unwrap(page)..., col)
+                end
             end
-            unlock(buffer)
+            unlock(cache)
         end
 
-        # Try again
-        cache = @inbounds buffer[]
-        col = acquire!(cache)
-        col === nothing || return (unsafe_unwrap(cache)..., col)
+        # Safepoint to avoid one thread completely blocking the entire system.
         GC.safepoint()
     end
 end
@@ -122,17 +151,30 @@ The properties of the returned `NamedTuple` are:
 """
 summary(table::CachedEmbedding) = merge(cachesummary(table), reservesummary(table))
 
+function _next(table::CachedEmbedding)
+    (; generation) = table
+    return (generation == (2^nbits(table) - 1)) ? 1 : (generation + 1)
+end
+
 """
     next!(table::CachedEmbedding)
 
 Set `table` to a new generation.
 """
 function next!(table::CachedEmbedding)
-    generation = table.generation
-    next = (generation == (2^nbits(table) - 1)) ? 1 : (generation + 1)
+    next = _next(table)
     table.generation = next
     return next
 end
+
+function next!(table::GenerationBasedEmbedding)
+    next = _next(table)
+    push!(strategy(table), next)
+    table.generation = next
+    return next
+end
+
+@inline current_generation(table::CachedEmbedding) = table.generation
 
 # Constructor
 const ITEMS_PER_CACHE_BLOCK = 512
@@ -150,11 +192,12 @@ end
 function CachedEmbedding{S}(
     base::C,
     ::Val{N};
+    strategy::G = BlockBased(),
     targetbytes::Integer = typemax(UInt32),
     targetreserve::Integer = typemax(UInt32),
     max_buffer_length = 1000,
     init::F = DefaultInit(base, ITEMS_PER_CACHE_BLOCK),
-) where {S,N,T,C<:AbstractMatrix{T},F}
+) where {S,N,T,C<:AbstractMatrix{T},G,F}
     # Initialize the original pointers
     pointers = map(axes(base, 2)) do col
         return TaggedPtrPair{N}(columnpointer(base, col))
@@ -162,7 +205,8 @@ function CachedEmbedding{S}(
     cache = CircularBuffer{CachePage{C}}(max_buffer_length)
     pagecache = Vector{CachePage{C}}()
     generation = 1
-    return CachedEmbedding{S,T,C,N,F}(
+    return CachedEmbedding{S,T,G,C,N,F}(
+        strategy,
         pointers,
         base,
         cache,
@@ -192,8 +236,7 @@ function settags!(table::CachedEmbedding{<:Any,<:Any,<:Any,N}, tag) where {N}
 end
 
 Base.@propagate_inbounds function backedgepointer(
-    pointers::Vector{TaggedPtrPair{N}},
-    i,
+    pointers::Vector{TaggedPtrPair{N}}, i
 ) where {N}
     @boundscheck checkbounds(pointers, i)
     return getfield(@inbounds(pointers[i]), :backedge)
@@ -201,9 +244,7 @@ end
 
 # In a generic indexing context, don't try to move any data, simply return the pointer
 function EmbeddingTables.columnpointer(
-    table::CachedEmbedding{<:Any,T},
-    i::Integer,
-    ::EmbeddingTables.IndexingContext,
+    table::CachedEmbedding{<:Any,T}, i::Integer, ::EmbeddingTables.IndexingContext
 ) where {T}
     Base.@_inline_meta
     return follow(T, table.pointers[i])
@@ -212,9 +253,7 @@ end
 # This level really wants to be inlined because the happy path is quite short.
 # Keep `_columnpointer` non-inlined because it requires a non-trivial amount of work.
 function EmbeddingTables.columnpointer(
-    table::CachedEmbedding{<:Any,T},
-    i::Integer,
-    ::EmbeddingTables.Forward,
+    table::CachedEmbedding{<:Any,T}, i::Integer, ::EmbeddingTables.Forward
 ) where {T}
     Base.@_inline_meta
     generation = table.generation
@@ -230,15 +269,10 @@ end
 
 const TIMES = [Vector{Int}() for _ in Base.OneTo(Threads.nthreads())]
 
-function _columnpointer!(
-    table::CachedEmbedding{<:Any,T},
-    ptr::Ptr{T},
-    tag,
-    backedge::Ptr{UInt64},
-    i,
+function cachevector!(
+    table::CachedEmbedding{<:Any,T}, ptr::Ptr{T}, current_tag, backedge::Ptr{UInt64}, i
 ) where {T}
-    generation = table.generation
-
+    new_tag = current_generation(table)
     # Slow path - need to copy the data array.
     data, backedges, col = table_and_column!(table)
 
@@ -255,12 +289,48 @@ function _columnpointer!(
 
     # If the original tag is not zero, then we need to clear the backedge for the old
     # cache location.
-    iszero(tag) || unsafe_store!(backedge, zero(UInt64))
+    iszero(current_tag) || unsafe_store!(backedge, zero(UInt64))
 
     # Update original pointer and return
     backedge_ptr = pointer(backedges, col)
-    update_with_tag!(pointer(table.pointers, i), dst_ptr, backedge_ptr, generation)
+    update_with_tag!(pointer(table.pointers, i), dst_ptr, backedge_ptr, new_tag)
     return Ptr{T}(dst_ptr)
+end
+
+"""
+    _columnpointer!(table::BlockBasedEmbedding, ptr::Ptr{T}, tag, backedge, i)
+
+Move vector `i` into the most recent cache page in `table` if its tag differs from `table`'s
+current generation. Doing this will update the tag to the most recent generation and
+invalidate the previously cached version of the vector.
+"""
+function _columnpointer!(
+    table::BlockBasedEmbedding{<:Any,T}, ptr::Ptr{T}, current_tag, backedge::Ptr{UInt64}, i
+) where {T}
+    return cachevector!(table, ptr, current_tag, backedge, i)
+end
+
+"""
+    _columnpointer!(table::BlockBasedEmbedding, ptr::Ptr{T}, tag, backedge, i)
+
+If embedding vector `i` is already cached, simply update its generation to the current
+generation in `table`.
+Otherwise, the vector will be cached as well.
+"""
+function _columnpointer!(
+    table::GenerationBasedEmbedding{<:Any,T},
+    ptr::Ptr{T},
+    current_tag,
+    backedge::Ptr{UInt64},
+    i,
+) where {T}
+    (; generation) = table
+    # If this entry is already cached, simply update its tag.
+    if !iszero(current_tag)
+        update_with_tag!(pointer(table.pointers, i), ptr, backedge, generation)
+        return ptr
+    end
+    return cachevector!(table, ptr, current_tag, backedge, i)
 end
 
 #####
@@ -269,8 +339,9 @@ end
 
 function prepopulate!(table::CachedEmbedding{<:Any,T}, tag) where {T}
     targetbytes = table.targetbytes
-    nvectors =
-        min(size(table, 2), div(targetbytes, sizeof(eltype(table)) * featuresize(table)))
+    nvectors = min(
+        size(table, 2), div(targetbytes, sizeof(eltype(table)) * featuresize(table))
+    )
     pointers = table.pointers
     for v in Base.OneTo(nvectors)
         own, ptr, _tag = acquire!(taggedpointer(pointers, v), tag)
@@ -300,10 +371,9 @@ This is called unsafe because it does not write back any cached data to the back
 store.
 """
 function unsafe_drop!(
-    table::CachedEmbedding{<:Any,<:Any,<:Any,N},
-    targetsize::Integer,
-    currentsize = cachesummary(table).cachesize,
-) where {N}
+    table::CachedEmbedding, targetsize::Integer, currentsize = cachesummary(table).cachesize
+)
+    N = nbits(table)
     cleanup!(table.cache) do page
         currentsize <= targetsize && return (false, nothing)
         # Need to update backedge pointers.
@@ -389,10 +459,11 @@ end
 Return a vector of cache pages that need to be updated with respect to their base.
 """
 function get_writeback_work(
-    table::CachedEmbedding{<:Any,<:Any,C},
+    table::CachedEmbedding,
     targetsize::Integer = table.targetbytes,
     currentsize = cachesummary(table).cachesize,
-) where {C}
+)
+    C = arraytype(table)
     v = Vector{Tuple{typeof(table),CachePage{C}}}()
     cleanedpages = Int[]
     return get_writeback_work!(v, cleanedpages, table, targetsize, currentsize)
@@ -425,7 +496,7 @@ Write back data in any evicted page to its original source.
 function writeback!(tables::Ensemble, splitsize = 4, nthreads = 12)
     # First, queue up all the work we need to perform.
     work, npages = get_writeback_work(tables[1])
-    for i = 2:length(tables)
+    for i in 2:length(tables)
         get_writeback_work!(work, npages, tables[i])
     end
 
@@ -466,10 +537,9 @@ function writeback!(tables::Ensemble, splitsize = 4, nthreads = 12)
 end
 
 function writeback!(
-    table::CachedEmbedding{S,T,<:Any,N},
-    data::AbstractMatrix,
-    backedges::AbstractVector,
-) where {S,T,N}
+    table::CachedEmbedding{S,T}, data::AbstractMatrix, backedges::AbstractVector
+) where {S,T}
+    N = nbits(table)
     base = table.base
     for (datacol, backedge) in enumerate(backedges)
         iszero(backedge) && continue
@@ -488,9 +558,7 @@ end
 
 const AVX512BYTES = 64
 @generated function Base.copyto!(
-    ::Type{EmbeddingTables.Static{N}},
-    dst::Ptr{T},
-    src::Ptr{T},
+    ::Type{EmbeddingTables.Static{N}}, dst::Ptr{T}, src::Ptr{T}
 ) where {N,T}
     # Compute how many load and store instructions we need.
     numops, remainder = divrem(N * sizeof(T), AVX512BYTES)
@@ -507,4 +575,3 @@ const AVX512BYTES = 64
         $(stores...)
     end
 end
-
