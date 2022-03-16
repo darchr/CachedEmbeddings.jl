@@ -1,8 +1,7 @@
 #####
-##### CachedEmbedding
+##### Strategies
 #####
 
-# TODO: What if we can't cache the whole ensemble lookup?
 abstract type AbstractEmbeddingStrategy end
 struct BlockBased <: AbstractEmbeddingStrategy end
 
@@ -18,6 +17,10 @@ end
 function Base.push!(v::GenerationBased, generation::Integer)
     return push!(v.current_generations, generation)
 end
+
+#####
+##### CachedEmbedding
+#####
 
 """
     CachedEmbedding{S,T,G,C <: AbstractArray,N,F}
@@ -72,84 +75,44 @@ function inbase(ptr::Ptr{T}, table::CachedEmbedding{S,T}) where {S,T}
 end
 
 """
-    table_and_column!(table::CachedEmbedding) -> (AbstractMatrix, AbstractVector, Int)
+    allocate_in_cache!(table::CachedEmbedding) -> NamedTuple{(:data_pointer, :backedge_pointer)}
 
-Return a 3-tuple containing (1) an opaque matrix of data, (2) an opaque vector of backedge
-pointers, and (3) an index `i`.
-
-With these returned items, it is safe to mutate the matrix along column `i` and the back
-edge vector at entry `i`.
 """
-function table_and_column!(table::CachedEmbedding)
+@inline function allocate_in_cache!(table::CachedEmbedding)
+    (; cache) = table
+    # Happy path
+    page = @inbounds cache[]
+    if page !== nothing
+        col = acquire!(page)
+        col !== nothing && return unsafe_unwrap(page, col)
+    end
+
+    # Slow path
+    return allocate_in_cache_add_page!(table)
+end
+
+# Slow path - a new page is needed for the buffer.
+@noinline function allocate_in_cache_add_page!(table)
     (; cache, pagecache, init) = table
-
     while true
-        # Happy path
-        page = cache[]
-        if page !== nothing
-            col = acquire!(page)
-            col === nothing || return (unsafe_unwrap(page)..., col)
-        end
-
-        # Sad path
         if trylock(cache)
-            # Need to try again after acquiring the lock because a new cache may have
+            # Need to try again after acquiring the lock because a new page may have
             # been added while we were in the safe point or trying to acquire the lock
             # in the first place.
-            page = cache[]
-            if page === nothing
-                @assert isempty(cache)
-                push!(cache, isempty(pagecache) ? init() : pop!(pagecache))
-            else
+            page = @inbounds cache[]
+            if page !== nothing
                 col = acquire!(page)
-                if col === nothing
-                    push!(cache, isempty(pagecache) ? init() : pop!(pagecache))
-                else
+                if col !== nothing
                     unlock(cache)
-                    return (unsafe_unwrap(page)..., col)
+                    return unsafe_unwrap(page, col)
                 end
             end
+            push!(cache, isempty(pagecache) ? init() : pop!(pagecache))
             unlock(cache)
         end
-
-        # Safepoint to avoid one thread completely blocking the entire system.
         GC.safepoint()
     end
 end
-
-function cachesummary(table::CachedEmbedding)
-    # Number and total size of active pages
-    cachepages = 0
-    cachesize = 0
-    for page in table.cache
-        cachepages += 1
-        cachesize += sizeof(page)
-    end
-    return (; cachepages, cachesize)
-end
-
-function reservesummary(table::CachedEmbedding)
-    # Number of reserve pages and size
-    reservepages = 0
-    reservesize = 0
-    for page in table.pagecache
-        reservepages += 1
-        reservesize += sizeof(page)
-    end
-    return (; reservepages, reservesize)
-end
-
-"""
-    summary(table::CachedEmbedding) -> NamedTuple
-
-Return a summary of the cache state for `table`.
-The properties of the returned `NamedTuple` are:
-* `cachepages` - The number of active pages in `table`'s cache.
-* `cachesize` - The total data memory footprint of the cache.
-* `reservepages` - The number of pages reserved to be inserted into the cache.
-* `reservesize` - The total memory footprint of the page cache.
-"""
-summary(table::CachedEmbedding) = merge(cachesummary(table), reservesummary(table))
 
 function _next(table::CachedEmbedding)
     (; generation) = table
@@ -270,31 +233,33 @@ end
 const TIMES = [Vector{Int}() for _ in Base.OneTo(Threads.nthreads())]
 
 function cachevector!(
-    table::CachedEmbedding{<:Any,T}, ptr::Ptr{T}, current_tag, backedge::Ptr{UInt64}, i
+    table::CachedEmbedding{<:Any,T},
+    ptr::Ptr{T},
+    current_tag,
+    current_backedge::Ptr{UInt64},
+    i,
 ) where {T}
     new_tag = current_generation(table)
     # Slow path - need to copy the data array.
-    data, backedges, col = table_and_column!(table)
+    (; data_pointer, backedge_pointer) = allocate_in_cache!(table)
 
     # Store the original column in the first region of data
-    @inbounds backedges[col] = i
+    unsafe_store!(backedge_pointer, i)
 
     # Copy over data
-    dst_ptr = columnpointer(data, col)
     for j in axes(table, 1)
         EmbeddingTables.@_ivdep_meta
         EmbeddingTables.@_interleave_meta(8)
-        unsafe_store!(dst_ptr, unsafe_load(ptr, j), j)
+        unsafe_store!(data_pointer, unsafe_load(ptr, j), j)
     end
 
     # If the original tag is not zero, then we need to clear the backedge for the old
     # cache location.
-    iszero(current_tag) || unsafe_store!(backedge, zero(UInt64))
+    iszero(current_tag) || unsafe_store!(current_backedge, zero(UInt64))
 
     # Update original pointer and return
-    backedge_ptr = pointer(backedges, col)
-    update_with_tag!(pointer(table.pointers, i), dst_ptr, backedge_ptr, new_tag)
-    return Ptr{T}(dst_ptr)
+    update_with_tag!(pointer(table.pointers, i), data_pointer, backedge_pointer, new_tag)
+    return Ptr{T}(data_pointer)
 end
 
 """
@@ -374,11 +339,11 @@ function unsafe_drop!(
     table::CachedEmbedding, targetsize::Integer, currentsize = cachesummary(table).cachesize
 )
     N = nbits(table)
-    cleanup!(table.cache) do page
-        currentsize <= targetsize && return (false, nothing)
+    (; base, cache) = table
+    cleanup!(cache) do page
+        currentsize <= targetsize && return false
         # Need to update backedge pointers.
-        backedges = page.backedges
-        base = table.base
+        (; backedges) = page
         for col in eachindex(backedges)
             backedge = @inbounds backedges[col]
             # If the backedge has been zeroed, then there's nothing to do.
@@ -392,7 +357,7 @@ function unsafe_drop!(
         reset!(page)
         push!(table.pagecache, page)
         currentsize -= sizeof(page)
-        return (true, nothing)
+        return true
     end
     return nothing
 end
@@ -400,12 +365,11 @@ end
 function unsafe_drop_noclean!(table::CachedEmbedding, npages::Integer)
     pagescleaned = 0
     cleanup!(table.cache) do page
-        pagescleaned >= npages && return (false, nothing)
-
+        pagescleaned >= npages && return false
         reset!(page)
         push!(table.pagecache, page)
         pagescleaned += 1
-        return (true, nothing)
+        return true
     end
     return nothing
 end
@@ -428,7 +392,7 @@ end
 
 _maybe_free(_) = nothing
 _maybe_free(x::CachedArrays.CachedArray) = CachedArrays.unsafe_free(x)
-_maybe_free(x::CachePage{<:CachedArrays.CachedArray}) = _maybe_free(unsafe_unwrap(x))
+_maybe_free(x::CachePage{<:CachedArrays.CachedArray}) = _maybe_free(x.data)
 
 #####
 ##### Convenience Functions
@@ -469,6 +433,17 @@ function get_writeback_work(
     return get_writeback_work!(v, cleanedpages, table, targetsize, currentsize)
 end
 
+function get_writeback_work(tables::Ensemble)
+    example = tables[begin]
+    C = arraytype(example)
+    v = Vector{Tuple{typeof(example),CachePage{C}}}()
+    cleanedpages = Int[]
+    for table in tables
+        get_writeback_work!(v, cleanedpages, table)
+    end
+    return (v, cleanedpages)
+end
+
 function get_writeback_work!(
     v::AbstractVector,
     cleanedpages::AbstractVector{<:Integer},
@@ -495,10 +470,7 @@ Write back data in any evicted page to its original source.
 """
 function writeback!(tables::Ensemble, splitsize = 4, nthreads = 12)
     # First, queue up all the work we need to perform.
-    work, npages = get_writeback_work(tables[1])
-    for i in 2:length(tables)
-        get_writeback_work!(work, npages, tables[i])
-    end
+    work, npages = get_writeback_work(tables)
 
     # Next, use our poor man's load balancing to divide up the work among threads.
     count = Threads.Atomic{Int}(1)
@@ -514,6 +486,10 @@ function writeback!(tables::Ensemble, splitsize = 4, nthreads = 12)
             # Convert into a big-little index.
             j, i = EmbeddingTables._divrem_index(k, divisor)
             table, page = work[i]
+
+            # N.B. - can't use
+            # (; data, backedges) = page
+            # because Polyester's macro can't handle it.
             data, backedges = page.data, page.backedges
 
             pagelen = length(backedges)
@@ -548,7 +524,7 @@ function writeback!(
         # Need to non-temporally writeback.
         dst = columnpointer(base, backedge)
         src = columnpointer(data, datacol)
-        copyto!(S, dst, src)
+        copyto_nt!(S, dst, src)
 
         # Zero out the saved backedge for safety.
         @inbounds backedges[datacol] = zero(eltype(backedges))
@@ -557,7 +533,7 @@ function writeback!(
 end
 
 const AVX512BYTES = 64
-@generated function Base.copyto!(
+@generated function copyto_nt!(
     ::Type{EmbeddingTables.Static{N}}, dst::Ptr{T}, src::Ptr{T}
 ) where {N,T}
     # Compute how many load and store instructions we need.
@@ -568,10 +544,49 @@ const AVX512BYTES = 64
 
     # TODO: Handle SIMD.Vec length parameter automatically.
     loads = load_impl(SIMD.Vec{16,T}, numops)
-    stores = store_impl(SIMD.Vec{16,T}, numops)
+    stores = store_nt_impl(SIMD.Vec{16,T}, numops)
     return quote
         Base.@_inline_meta
         $(loads...)
         $(stores...)
     end
 end
+
+#####
+##### Summary
+#####
+
+function cachesummary(table::CachedEmbedding)
+    # Number and total size of active pages
+    cachepages = 0
+    cachesize = 0
+    for page in table.cache
+        cachepages += 1
+        cachesize += sizeof(page)
+    end
+    return (; cachepages, cachesize)
+end
+
+function reservesummary(table::CachedEmbedding)
+    # Number of reserve pages and size
+    reservepages = 0
+    reservesize = 0
+    for page in table.pagecache
+        reservepages += 1
+        reservesize += sizeof(page)
+    end
+    return (; reservepages, reservesize)
+end
+
+"""
+    summary(table::CachedEmbedding) -> NamedTuple
+
+Return a summary of the cache state for `table`.
+The properties of the returned `NamedTuple` are:
+* `cachepages` - The number of active pages in `table`'s cache.
+* `cachesize` - The total data memory footprint of the cache.
+* `reservepages` - The number of pages reserved to be inserted into the cache.
+* `reservesize` - The total memory footprint of the page cache.
+"""
+summary(table::CachedEmbedding) = merge(cachesummary(table), reservesummary(table))
+

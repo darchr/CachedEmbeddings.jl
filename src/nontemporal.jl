@@ -7,7 +7,7 @@ function load_impl(::Type{T}, U::Integer) where {T<:SIMD.Vec}
     end
 end
 
-function store_impl(::Type{T}, U::Integer) where {T<:SIMD.Vec}
+function store_nt_impl(::Type{T}, U::Integer) where {T<:SIMD.Vec}
     return map(0:(U - 1)) do j
         x = Symbol("i_$j")
         # Vector Store

@@ -61,6 +61,7 @@ end
         @test isempty(buffer) == false
         @test CachedEmbeddings.isfull(buffer) == false
         @test length(buffer) == 1
+        @test buffer[lastindex(buffer)] == [5]
     finally
         unlock(buffer)
     end

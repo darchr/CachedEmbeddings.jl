@@ -39,10 +39,18 @@ function acquire!(cache::CachePage)
 end
 
 """
-    unsafe_unwrap(cache::CachePage)
+    unsafe_unwrap(cache::CachePage, col::Integer) -> NamedTuple{(:data_pointer, :backedge_pointer)}
 
-Return the raw data array wrapped by `cache`.
-The underlying data should only be accessed on the slice provided by a call to
-`acquire!(cache)`.
+Return a `NamedTuple` `nt` with fields `data_pointer` and `backedge_pointer`.
+Field `nt.data_pointer` is a pointer to a column of data in `cache`.
+Field `nt.backedge_pointer` is a pointer to the backedge slot for the corresponding column.
+
+This function is marked unsafe because the return pointers to not prevent `cache` from
+being collected by the GC.
 """
-unsafe_unwrap(cache::CachePage) = cache.data, cache.backedges
+function unsafe_unwrap(cache::CachePage, col::Integer)
+    (; data, backedges) = cache
+    data_pointer = EmbeddingTables.columnpointer(data, col)
+    backedge_pointer = pointer(backedges, col)
+    return (; data_pointer, backedge_pointer)
+end

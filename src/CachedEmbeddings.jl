@@ -26,6 +26,7 @@ macro dict(syms...)
     return :(Dictionaries.Dictionary{Symbol,Any}(($(keys...),), ($(values...),)))
 end
 
+include("utils.jl")
 include("atomics.jl")
 import .Atomics: Atomics
 include("buffer.jl")
