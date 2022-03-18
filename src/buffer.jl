@@ -55,15 +55,13 @@ end
 @inline Base.lock(buffer::CircularBuffer) = lock(buffer.writelock)
 @inline Base.unlock(buffer::CircularBuffer) = unlock(buffer.writelock)
 
-@inline Base.getindex(buffer::CircularBuffer, i::Integer) = buffer.buffer[i]
+@inline function Base.getindex(buffer::CircularBuffer, i::Integer = lastindex(buffer))
+    return buffer.buffer[i]
+end
 @inline function Base.setindex!(
     buffer::CircularBuffer{T}, v::Union{T,Nothing}, i::Integer
 ) where {T}
     return (buffer.buffer[i] = v)
-end
-
-@inline function Base.getindex(buffer::CircularBuffer)
-    return isempty(buffer) ? nothing : @inbounds(buffer[lastindex(buffer)])
 end
 
 Base.@propagate_inbounds function Base.push!(buffer::CircularBuffer{T}, v::T) where {T}

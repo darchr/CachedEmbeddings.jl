@@ -10,13 +10,13 @@ struct GenerationBased <: AbstractEmbeddingStrategy
 end
 GenerationBased() = GenerationBased(Int[])
 
-Base.length(v::GenerationBased) = length(v.current_generations)
-function Base.popfirst!(v::GenerationBased)
-    return popfirst_and_shift(v.current_generations)
-end
-function Base.push!(v::GenerationBased, generation::Integer)
-    return push!(v.current_generations, generation)
-end
+# Base.length(v::GenerationBased) = length(v.current_generations)
+# function Base.popfirst!(v::GenerationBased)
+#     return popfirst_and_shift(v.current_generations)
+# end
+# function Base.push!(v::GenerationBased, generation::Integer)
+#     return push!(v.current_generations, generation)
+# end
 
 #####
 ##### CachedEmbedding
@@ -63,16 +63,16 @@ nbits(::CachedEmbedding{<:Any,<:Any,<:Any,<:Any,N}) where {N} = N
 EmbeddingTables.example(A::CachedEmbedding) = A.base
 arraytype(::CachedEmbedding{<:Any,<:Any,<:Any,C}) where {C} = C
 
-@inline function base_addresses(table::CachedEmbedding{S,T}) where {S,T}
-    (; base) = table
-    base_address = UInt(pointer(base))
-    length = sizeof(base)
-    return base_address:(base_address + length - sizeof(T))
-end
-
-function inbase(ptr::Ptr{T}, table::CachedEmbedding{S,T}) where {S,T}
-    return in(UInt(ptr), base_addresses(table))
-end
+# @inline function base_addresses(table::CachedEmbedding{S,T}) where {S,T}
+#     (; base) = table
+#     base_address = UInt(pointer(base))
+#     length = sizeof(base)
+#     return base_address:(base_address + length - sizeof(T))
+# end
+#
+# function inbase(ptr::Ptr{T}, table::CachedEmbedding{S,T}) where {S,T}
+#     return in(UInt(ptr), base_addresses(table))
+# end
 
 """
     allocate_in_cache!(table::CachedEmbedding) -> NamedTuple{(:data_pointer, :backedge_pointer)}
@@ -81,7 +81,7 @@ end
 @inline function allocate_in_cache!(table::CachedEmbedding)
     (; cache) = table
     # Happy path
-    page = @inbounds cache[]
+    page = @inbounds cache[end]
     if page !== nothing
         col = acquire!(page)
         col !== nothing && return unsafe_unwrap(page, col)
@@ -99,7 +99,7 @@ end
             # Need to try again after acquiring the lock because a new page may have
             # been added while we were in the safe point or trying to acquire the lock
             # in the first place.
-            page = @inbounds cache[]
+            page = @inbounds cache[end]
             if page !== nothing
                 col = acquire!(page)
                 if col !== nothing
@@ -225,7 +225,7 @@ function EmbeddingTables.columnpointer(
     if !own
         return Ptr{T}(ptr)
     else
-        backedge = backedgepointer(table.pointers, i)
+        backedge = @inbounds(backedgepointer(table.pointers, i))
         return _columnpointer!(table, Ptr{T}(ptr), tag, backedge, i)
     end
 end
@@ -233,20 +233,23 @@ end
 const TIMES = [Vector{Int}() for _ in Base.OneTo(Threads.nthreads())]
 
 function cachevector!(
-    table::CachedEmbedding{<:Any,T},
+    table::CachedEmbedding{EmbeddingTables.Static{N},T},
     ptr::Ptr{T},
     current_tag,
     current_backedge::Ptr{UInt64},
     i,
-) where {T}
+) where {N,T}
     new_tag = current_generation(table)
     # Slow path - need to copy the data array.
     (; data_pointer, backedge_pointer) = allocate_in_cache!(table)
 
     # Store the original column in the first region of data
-    unsafe_store!(backedge_pointer, i)
+    unsafe_store!(backedge_pointer, unsigned(i))
 
     # Copy over data
+    # loadtype = EmbeddingTables.simdtype(EmbeddingTables.Static{N}(), T)
+    # temp = EmbeddingTables.load(loadtype, ptr)
+    # EmbeddingTables.store(temp, data_pointer)
     for j in axes(table, 1)
         EmbeddingTables.@_ivdep_meta
         EmbeddingTables.@_interleave_meta(8)
@@ -269,7 +272,7 @@ Move vector `i` into the most recent cache page in `table` if its tag differs fr
 current generation. Doing this will update the tag to the most recent generation and
 invalidate the previously cached version of the vector.
 """
-function _columnpointer!(
+@inline function _columnpointer!(
     table::BlockBasedEmbedding{<:Any,T}, ptr::Ptr{T}, current_tag, backedge::Ptr{UInt64}, i
 ) where {T}
     return cachevector!(table, ptr, current_tag, backedge, i)

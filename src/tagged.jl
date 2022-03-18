@@ -43,7 +43,7 @@ end
 end
 
 @inline mask(n) = mask(UInt, n)
-@inline mask(::Type{T}, n) where {T} = (T(2)^n) - one(T)
+@inline mask(::Type{T}, n) where {T} = (one(T) << n) - one(T)
 
 @inline iscached(v::TaggedPtrPair, tag) = iscached(v.tagged, tag)
 @inline iscached(v::TaggedPtr{N}, tag) where {N} = iscached(value(v), N, tag)
