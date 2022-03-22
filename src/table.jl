@@ -111,6 +111,13 @@ end
             unlock(cache)
         end
         GC.safepoint()
+
+        # Try again outside of lock - maybe another thread managed to populate this slot.
+        page = @inbounds cache[end]
+        if page !== nothing
+            col = acquire!(page)
+            col !== nothing && unsafe_unwrap(page, col)
+        end
     end
 end
 
@@ -258,7 +265,7 @@ function cachevector!(
 
     # If the original tag is not zero, then we need to clear the backedge for the old
     # cache location.
-    iszero(current_tag) || unsafe_store!(current_backedge, zero(UInt64))
+    !iszero(current_tag) && unsafe_store!(current_backedge, zero(UInt64))
 
     # Update original pointer and return
     update_with_tag!(pointer(table.pointers, i), data_pointer, backedge_pointer, new_tag)
@@ -481,7 +488,7 @@ function writeback!(tables::Ensemble, splitsize = 4, nthreads = 12)
     divisor == 0 && return nothing
 
     len = divisor * splitsize
-    Polyester.@batch (per = core) for i in Base.OneTo(nthreads)
+    Polyester.@batch (per = thread) for i in Base.OneTo(nthreads)
         while true
             k = Threads.atomic_add!(count, 1)
             k > len && break
@@ -508,7 +515,7 @@ function writeback!(tables::Ensemble, splitsize = 4, nthreads = 12)
     end
 
     # We're done writing back - now just cleanup.
-    Polyester.@batch (per = core) for i in eachindex(tables)
+    Polyester.@batch (per = thread) for i in eachindex(tables)
         unsafe_drop_noclean!(tables[i], npages[i])
         shrink_pagecache!(tables[i])
     end

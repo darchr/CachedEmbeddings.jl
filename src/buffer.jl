@@ -93,7 +93,7 @@ If the optional function `f` is passed, than this function is called on each ite
 in the buffer. This function must have a return value of type `Bool` that indicates if
 `cleanup!` should continue (`true`) of stop prematurely (`false`).
 
-*NOTE*: This function is not threadsafe and should only be called while no other threads
+NOTE*: This function is not threadsafe and should only be called while no other threads
 are trying to access the container.
 """
 cleanup!(buffer::CircularBuffer) = cleanup!(Returns(true), buffer)

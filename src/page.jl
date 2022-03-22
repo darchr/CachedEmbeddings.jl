@@ -3,9 +3,9 @@ struct CachePage{C<:AbstractArray}
     insert::Threads.Atomic{Int}
     maxlen::Int
 
-    # The cached data.
-    # N.B. - This may optionally include more metadata than just the pure data array.
+    # Backedges store the original vector ID
     backedges::Vector{UInt64}
+    # The actual data itself.
     data::C
 end
 
