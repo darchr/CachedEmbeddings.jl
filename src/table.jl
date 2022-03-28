@@ -10,13 +10,13 @@ struct GenerationBased <: AbstractEmbeddingStrategy
 end
 GenerationBased() = GenerationBased(Int[])
 
-# Base.length(v::GenerationBased) = length(v.current_generations)
-# function Base.popfirst!(v::GenerationBased)
-#     return popfirst_and_shift(v.current_generations)
-# end
-# function Base.push!(v::GenerationBased, generation::Integer)
-#     return push!(v.current_generations, generation)
-# end
+Base.length(v::GenerationBased) = length(v.current_generations)
+function Base.popfirst!(v::GenerationBased)
+    return popfirst_and_shift(v.current_generations)
+end
+function Base.push!(v::GenerationBased, generation::Integer)
+    return push!(v.current_generations, generation)
+end
 
 #####
 ##### CachedEmbedding
@@ -112,17 +112,18 @@ end
         end
         GC.safepoint()
 
-        # Try again outside of lock - maybe another thread managed to populate this slot.
+        # # Try again outside of lock - maybe another thread managed to populate this slot.
         page = @inbounds cache[end]
         if page !== nothing
             col = acquire!(page)
-            col !== nothing && unsafe_unwrap(page, col)
+            col !== nothing && return unsafe_unwrap(page, col)
         end
     end
 end
 
+@inline current_generation(table::CachedEmbedding) = table.generation
 function _next(table::CachedEmbedding)
-    (; generation) = table
+    generation = current_generation(table)
     return (generation == (2^nbits(table) - 1)) ? 1 : (generation + 1)
 end
 
@@ -143,8 +144,6 @@ function next!(table::GenerationBasedEmbedding)
     table.generation = next
     return next
 end
-
-@inline current_generation(table::CachedEmbedding) = table.generation
 
 # Constructor
 const ITEMS_PER_CACHE_BLOCK = 512
@@ -299,7 +298,7 @@ function _columnpointer!(
     backedge::Ptr{UInt64},
     i,
 ) where {T}
-    (; generation) = table
+    generation = current_generation(table)
     # If this entry is already cached, simply update its tag.
     if !iszero(current_tag)
         update_with_tag!(pointer(table.pointers, i), ptr, backedge, generation)
@@ -313,16 +312,15 @@ end
 #####
 
 function prepopulate!(table::CachedEmbedding{<:Any,T}, tag) where {T}
-    targetbytes = table.targetbytes
+    (; targetbytes, pointers) = table
     nvectors = min(
         size(table, 2), div(targetbytes, sizeof(eltype(table)) * featuresize(table))
     )
-    pointers = table.pointers
     for v in Base.OneTo(nvectors)
         own, ptr, _tag = acquire!(taggedpointer(pointers, v), tag)
         if own
             backedge = backedgepointer(pointers, v)
-            _columnpointer!(table, Ptr{T}(ptr), _tag, backedge, v)
+            cachevector!(table, Ptr{T}(ptr), _tag, backedge, v)
         end
     end
     return nothing
