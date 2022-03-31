@@ -34,6 +34,7 @@ include("tagged.jl")
 include("page.jl")
 include("nontemporal.jl")
 include("table.jl")
+include("writeback.jl")
 include("verification.jl")
 
 end
