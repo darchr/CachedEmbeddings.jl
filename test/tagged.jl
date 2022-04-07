@@ -21,17 +21,22 @@
 
     # Test `acquire`
     x = Vector{CachedEmbeddings.TaggedPtrPair{3}}()
-    push!(x, CachedEmbeddings.TaggedPtrPair{3}(0))
+    push!(x, CachedEmbeddings.TaggedPtrPair{3}(0x1230))
     own, val = CachedEmbeddings.acquire!(CachedEmbeddings.taggedpointer(x, 1), 1)
     @test own == true
-    @test val == Ptr{Nothing}(0)
+    @test val == Ptr{Nothing}(UInt(0x1230))
 
     # Second time should return false since this `TaggedPtr` is now owned.
     @test CachedEmbeddings.gettag(x[1].tagged) == 1
     @test CachedEmbeddings.iscached(x[1].tagged, 1) == true
     own, val = CachedEmbeddings.acquire!(CachedEmbeddings.taggedpointer(x, 1), 1)
     @test own == false
-    @test val == Ptr{Nothing}(0)
+    @test val == Ptr{Nothing}(UInt(0x1230))
+
+    # Force set the tag back to zero.
+    CachedEmbeddings.release!(CachedEmbeddings.taggedpointer(x, 1), UInt(0x1230), 2)
+    @test CachedEmbeddings.gettag(x[1].tagged) == 2
+    @test x[1].tagged[] == Ptr{Nothing}(UInt(0x1230))
 
     # Finally, test that the update function works
     newptr = Ptr{Nothing}(typemax(UInt) & ~7)

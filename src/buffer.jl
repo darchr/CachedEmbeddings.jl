@@ -98,17 +98,15 @@ are trying to access the container.
 """
 cleanup!(buffer::CircularBuffer) = cleanup!(Returns(true), buffer)
 function cleanup!(f::F, buffer::CircularBuffer) where {F}
-    Base.@lock buffer begin
-        while true
-            isempty(buffer) && return nothing
-            i = tail(buffer)
-            canclean = f(buffer[i])
-            if canclean
-                buffer[i] = nothing
-                settail!(buffer, inc(buffer, i))
-            else
-                return nothing
-            end
+    while true
+        isempty(buffer) && return nothing
+        i = tail(buffer)
+        canclean = f(buffer[i])
+        if canclean
+            buffer[i] = nothing
+            settail!(buffer, inc(buffer, i))
+        else
+            return nothing
         end
     end
 end

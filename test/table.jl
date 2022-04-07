@@ -133,3 +133,25 @@ end
     @test length(cached.cache) == 5
     @test length(cached.pagecache) == 2
 end
+
+@testset "Testing Full Table" begin
+    batchsize = 128
+    featuresize = 64
+    ncols = 10_000
+
+    base = randn(Float32, featuresize, ncols)
+    S = Static{featuresize}
+    cached = CachedEmbeddings.CachedEmbedding{S}(
+        copy(base),
+        Val(3);
+        # Target roughly 3 batches in the cache with 2 batches in reserve
+        targetbytes = 3 * featuresize * batchsize * sizeof(Float32),
+        targetreserve = 1 * featuresize * batchsize * sizeof(Float32),
+        init = CachedEmbeddings.DefaultInit(base, batchsize),
+    )
+
+    for i in Base.OneTo(7)
+        inds = rand(Base.OneTo(ncols), batchsize)
+        lookup(cached, inds)
+    end
+end

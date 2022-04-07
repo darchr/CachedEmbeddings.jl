@@ -60,6 +60,11 @@ end
     return (success, v[], gettag(v))
 end
 
+@inline function release!(::Type{TaggedPtr{N}}, ptr::Ptr{UInt}, value0, tag) where {N}
+    newvalue = settag(TaggedPtr{N}(value0), tag)
+    return Atomics.atomic_ptr_xchg!(ptr, value(newvalue))
+end
+
 """
     acquire!(ptr::Ptr{TaggedPtr{N}}, tag) -> (Bool, Ptr{Nothing}, UInt)
 
@@ -79,6 +84,10 @@ This function is (at least, **SHOULD** be) threadsafe.
 """
 @inline function acquire!(ptr::Ptr{<:MaybePair{N}}, tag) where {N}
     return acquire!(TaggedPtr{N}, primitive(ptr), tag)
+end
+
+@inline function release!(ptr::Ptr{<:MaybePair{N}}, value, tag) where {N}
+    return release!(TaggedPtr{N}, primitive(ptr), value, tag)
 end
 
 function update_with_tag!(

@@ -10,13 +10,13 @@ struct GenerationBased <: AbstractEmbeddingStrategy
 end
 GenerationBased() = GenerationBased(Int[])
 
-Base.length(v::GenerationBased) = length(v.current_generations)
-function Base.popfirst!(v::GenerationBased)
-    return popfirst_and_shift(v.current_generations)
-end
-function Base.push!(v::GenerationBased, generation::Integer)
-    return push!(v.current_generations, generation)
-end
+# Base.length(v::GenerationBased) = length(v.current_generations)
+# function Base.popfirst!(v::GenerationBased)
+#     return popfirst_and_shift(v.current_generations)
+# end
+# function Base.push!(v::GenerationBased, generation::Integer)
+#     return push!(v.current_generations, generation)
+# end
 
 #####
 ##### CachedEmbedding
@@ -39,6 +39,7 @@ mutable struct CachedEmbedding{S,T,G<:AbstractEmbeddingStrategy,C<:AbstractMatri
     pointers::Vector{TaggedPtrPair{N}}
     # Remote store
     base::C
+    full::Threads.Atomic{Bool}
     cache::CircularBuffer{CachePage{C}}
     pagecache::Vector{CachePage{C}}
     generation::Int
@@ -47,6 +48,7 @@ mutable struct CachedEmbedding{S,T,G<:AbstractEmbeddingStrategy,C<:AbstractMatri
     # Target characteristics for the `cache` and `pagecache`.
     # Keep these as part of the `Embedding` itself to allow customization on a per-table
     # level.
+    currentsize::Int
     targetbytes::Int
     targetreserve::Int
 end
@@ -58,6 +60,7 @@ const GenerationBasedEmbedding{S,T} = CachedEmbedding{S,T,GenerationBased}
 # Simple Functions
 @inline Base.size(A::CachedEmbedding) = size(A.base)
 @inline strategy(A::CachedEmbedding) = A.strategy
+@inline isfull(A::CachedEmbedding) = A.full[]
 
 nbits(::CachedEmbedding{<:Any,<:Any,<:Any,<:Any,N}) where {N} = N
 EmbeddingTables.example(A::CachedEmbedding) = A.base
@@ -78,9 +81,10 @@ arraytype(::CachedEmbedding{<:Any,<:Any,<:Any,C}) where {C} = C
     allocate_in_cache!(table::CachedEmbedding) -> NamedTuple{(:data_pointer, :backedge_pointer)}
 
 """
-@inline function allocate_in_cache!(table::CachedEmbedding)
+function allocate_in_cache!(table::CachedEmbedding)
     (; cache) = table
     # Happy path
+    isfull(table) && return nothing
     page = @inbounds cache[end]
     if page !== nothing
         col = acquire!(page)
@@ -96,6 +100,20 @@ end
     (; cache, pagecache, init) = table
     while true
         if trylock(cache)
+            # Check to see if the table is full.
+            # The fast path is to check the atomic variable.
+            # If it is not set, than there's still the possibility that we're full and
+            # just don't realize it yet.
+            # In that case, check the tracked size of the table.
+            if isfull(table)
+                unlock(cache)
+                return nothing
+            elseif table.currentsize >= table.targetbytes + table.targetreserve
+                table.full[] = true
+                unlock(cache)
+                return nothing
+            end
+
             # Need to try again after acquiring the lock because a new page may have
             # been added while we were in the safe point or trying to acquire the lock
             # in the first place.
@@ -107,12 +125,17 @@ end
                     return unsafe_unwrap(page, col)
                 end
             end
-            push!(cache, isempty(pagecache) ? init() : pop!(pagecache))
+
+            # If we've reached this point, then we're good to add a new page to the cache.
+            newpage = isempty(pagecache) ? init() : pop!(pagecache)
+            table.currentsize += sizeof(page)
+            push!(cache, newpage)
             unlock(cache)
         end
         GC.safepoint()
 
         # # Try again outside of lock - maybe another thread managed to populate this slot.
+        isfull(table) && return nothing
         page = @inbounds cache[end]
         if page !== nothing
             col = acquire!(page)
@@ -178,10 +201,12 @@ function CachedEmbedding{S}(
         strategy,
         pointers,
         base,
+        Threads.Atomic{Bool}(false),
         cache,
         pagecache,
         generation,
         init,
+        0,
         targetbytes,
         targetreserve,
     )
@@ -221,10 +246,13 @@ end
 
 # This level really wants to be inlined because the happy path is quite short.
 # Keep `_columnpointer` non-inlined because it requires a non-trivial amount of work.
-function EmbeddingTables.columnpointer(
+@inline function EmbeddingTables.columnpointer(
     table::CachedEmbedding{<:Any,T}, i::Integer, ::EmbeddingTables.Forward
 ) where {T}
-    Base.@_inline_meta
+    # If the table is full, then we can't cache anything.
+    isfull(table) && return follow(T, table.pointers[i])
+
+    # Otherwise, maybe gain ownership of this feature vector.
     generation = table.generation
     own, ptr, tag = acquire!(taggedpointer(table.pointers, i), generation)
     # Fast path - just return the pointer
@@ -238,7 +266,7 @@ end
 
 const TIMES = [Vector{Int}() for _ in Base.OneTo(Threads.nthreads())]
 
-function cachevector!(
+@inline function cachevector!(
     table::CachedEmbedding{EmbeddingTables.Static{N},T},
     ptr::Ptr{T},
     current_tag,
@@ -247,7 +275,12 @@ function cachevector!(
 ) where {N,T}
     new_tag = current_generation(table)
     # Slow path - need to copy the data array.
-    (; data_pointer, backedge_pointer) = allocate_in_cache!(table)
+    result = allocate_in_cache!(table)
+    if result === nothing
+        release!(taggedpointer(table.pointers, i), ptr, current_tag)
+        return ptr
+    end
+    (; data_pointer, backedge_pointer) = result
 
     # Store the original column in the first region of data
     unsafe_store!(backedge_pointer, unsigned(i))
@@ -344,12 +377,14 @@ This is called unsafe because it does not write back any cached data to the back
 store.
 """
 function unsafe_drop!(
-    table::CachedEmbedding, targetsize::Integer, currentsize = cachesummary(table).cachesize
-)
-    N = nbits(table)
+    table::CachedEmbedding{<:Any,<:Any,<:Any,<:Any,N},
+    targetsize::Integer,
+    currentsize = cachesummary(table).cachesize,
+) where {N}
     (; base, cache) = table
+    currentsize_ref = Ref{Int}(currentsize)
     cleanup!(cache) do page
-        currentsize <= targetsize && return false
+        currentsize_ref[] <= targetsize && return false
         # Need to update backedge pointers.
         (; backedges) = page
         for col in eachindex(backedges)
@@ -364,9 +399,11 @@ function unsafe_drop!(
 
         reset!(page)
         push!(table.pagecache, page)
-        currentsize -= sizeof(page)
+        currentsize_ref[] -= sizeof(page)
         return true
     end
+    table.currentsize = cachesummary(table).cachesize
+    table.full[] = false
     return nothing
 end
 
@@ -379,6 +416,8 @@ function unsafe_drop_noclean!(table::CachedEmbedding, npages::Integer)
         pagescleaned += 1
         return true
     end
+    table.currentsize = cachesummary(table).cachesize
+    table.full[] = false
     return nothing
 end
 
