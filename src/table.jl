@@ -237,10 +237,9 @@ Base.@propagate_inbounds function backedgepointer(
 end
 
 # In a generic indexing context, don't try to move any data, simply return the pointer
-function EmbeddingTables.columnpointer(
+@inline function EmbeddingTables.columnpointer(
     table::CachedEmbedding{<:Any,T}, i::Integer, ::EmbeddingTables.IndexingContext
 ) where {T}
-    Base.@_inline_meta
     return follow(T, table.pointers[i])
 end
 
